@@ -30,6 +30,26 @@ Branch rule: keep `main` as the upstream mirror, do fixes on feature branches,
 run `./scripts/update.sh` from the branch you want the global CLI/server to use,
 then rebase or fast-forward against `upstream/main` before proposing changes.
 
+## Branch Runtime Testing
+
+Do not restart `omnigent.service` just to test a branch. That promotes the
+always-on server to the branch.
+
+For branch testing, run the current checkout as a separate host/client/runner
+against the configured stable server:
+
+```bash
+./scripts/branch-omnigent host
+./scripts/branch-omnigent codex
+./scripts/branch-omnigent claude --use-native-config
+./scripts/branch-omnigent polly
+```
+
+The helper uses the repo `.venv` when present, otherwise `uv run`; it injects a
+branch-specific host identity, isolates daemon state, and refuses `server` so it
+cannot accidentally start a replacement server. The matching agent skill is in
+`.agents/skills/omnigent-branch-runtime/SKILL.md`.
+
 If a server is already running, restart it after reinstalling:
 
 ```bash

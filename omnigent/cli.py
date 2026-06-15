@@ -1377,7 +1377,20 @@ def _runner_loopback_host(host: str) -> str:
     return "127.0.0.1" if host in {"0.0.0.0", "::", ""} else host
 
 
-_HOST_PID_PATH = Path.home() / ".omnigent" / "host.pid"
+def _host_state_dir() -> Path:
+    """Return the state dir for host daemon registry files.
+
+    Honors ``OMNIGENT_DATA_DIR`` so branch/worktree runtimes can isolate host
+    daemon records from the user's stable always-on daemon.
+    """
+
+    override = os.environ.get(_DATA_DIR_ENV_VAR)
+    if override:
+        return Path(override).expanduser()
+    return _STATE_DIR
+
+
+_HOST_PID_PATH = _host_state_dir() / "host.pid"
 
 
 # host.pid records the daemon PID + the "target" it serves: a normalized
@@ -1773,8 +1786,17 @@ def _load_existing_host_id() -> str | None:
     """
     Load the existing local host id without creating one.
 
+    Honors ``OMNIGENT_HOST_ID`` / ``OMNIGENT_HOST_NAME`` when both are set so
+    branch and managed-host runtimes use the same identity in daemon records and
+    readiness checks that the host tunnel uses when it connects.
+
     :returns: Host id from config, e.g. ``"host_abc123"``, or ``None``.
     """
+    env_host_id = os.environ.get("OMNIGENT_HOST_ID")
+    env_name = os.environ.get("OMNIGENT_HOST_NAME")
+    if env_host_id and env_name:
+        return env_host_id
+
     candidate_paths = [_effective_global_config_path()]
     from omnigent.host.identity import CONFIG_PATH
 

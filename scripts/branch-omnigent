@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+fail() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  ./scripts/branch-omnigent host
+  ./scripts/branch-omnigent codex [args...]
+  ./scripts/branch-omnigent claude [args...]
+  ./scripts/branch-omnigent polly [args...]
+  ./scripts/branch-omnigent run [args...]
+
+Runs Omnigent from the current checkout/branch against the configured stable
+server without changing the installed global CLI or restarting omnigent.service.
+
+Optional override:
+  OMNIGENT_BRANCH_SERVER=http://server.example ./scripts/branch-omnigent codex
+USAGE
+}
+
+command -v git >/dev/null || fail "git is required"
+command -v sha256sum >/dev/null || fail "sha256sum is required"
+
+[ -f pyproject.toml ] && grep -q '^name = "omnigent"$' pyproject.toml ||
+  fail "$ROOT is not the Omnigent repo"
+
+if [ "${1:-}" = "" ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+  exit 0
+fi
+
+branch="$(git branch --show-current)"
+if [ -z "$branch" ]; then
+  branch="detached-$(git rev-parse --short HEAD)"
+fi
+
+slug="$(
+  printf '%s' "$branch" |
+    tr '/:@ ' '----' |
+    tr -cd 'A-Za-z0-9._-' |
+    sed 's/^-*//; s/-*$//'
+)"
+[ -n "$slug" ] || slug="branch"
+
+repo_key="$(printf '%s' "$ROOT" | sha256sum | cut -c1-8)"
+host_digest="$(printf '%s:%s' "$ROOT" "$branch" | sha256sum | cut -c1-32)"
+host_short="$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf 'host')"
+
+export OMNIGENT_DATA_DIR="${OMNIGENT_DATA_DIR:-$HOME/.omnigent/branch-runtimes/$repo_key/$slug}"
+export OMNIGENT_HOST_ID="${OMNIGENT_HOST_ID:-host_$host_digest}"
+export OMNIGENT_HOST_NAME="${OMNIGENT_HOST_NAME:-$host_short-omnigent-$slug}"
+
+mkdir -p "$OMNIGENT_DATA_DIR"
+
+configured_server() {
+  if [ -n "${OMNIGENT_BRANCH_SERVER:-}" ]; then
+    printf '%s\n' "$OMNIGENT_BRANCH_SERVER"
+    return
+  fi
+
+  local config="${OMNIGENT_CONFIG_HOME:-$HOME/.omnigent}/config.yaml"
+  [ -f "$config" ] || return 1
+  awk '
+    /^[[:space:]]*server:[[:space:]]*/ {
+      sub(/^[[:space:]]*server:[[:space:]]*/, "", $0)
+      gsub(/^["'\'']|["'\'']$/, "", $0)
+      print
+      exit
+    }
+  ' "$config"
+}
+
+has_server_arg() {
+  local arg
+  for arg in "$@"; do
+    [ "$arg" = "--server" ] && return 0
+    case "$arg" in
+      --server=*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+has_all_arg() {
+  local arg
+  for arg in "$@"; do
+    [ "$arg" = "--all" ] && return 0
+  done
+  return 1
+}
+
+server_required_args() {
+  local cmd="$1"
+  shift
+  if has_server_arg "$@" || has_all_arg "$@"; then
+    set -- "$cmd" "$@"
+  else
+    local server
+    server="$(configured_server || true)"
+    [ -n "$server" ] ||
+      fail "no server configured. Set OMNIGENT_BRANCH_SERVER or run 'omnigent config set --global server=<url>'."
+    set -- "$cmd" --server "$server" "$@"
+  fi
+  printf '%s\0' "$@"
+}
+
+cmd="$1"
+shift
+
+case "$cmd" in
+  server)
+    fail "branch testing must not start/promote a server. Use the stable server, or start an explicit throwaway server outside this helper."
+    ;;
+  host|codex|claude|polly|debby|run|resume|attach)
+    mapfile -d '' argv < <(server_required_args "$cmd" "$@")
+    set -- "${argv[@]}"
+    ;;
+  *)
+    set -- "$cmd" "$@"
+    ;;
+esac
+
+echo "branch runtime: $branch" >&2
+echo "host: $OMNIGENT_HOST_NAME ($OMNIGENT_HOST_ID)" >&2
+echo "data: $OMNIGENT_DATA_DIR" >&2
+if [ -x "$ROOT/.venv/bin/omnigent" ]; then
+  runner=("$ROOT/.venv/bin/omnigent")
+else
+  command -v uv >/dev/null || fail "uv is required when .venv/bin/omnigent is absent"
+  runner=(uv run omnigent)
+fi
+
+echo "exec: ${runner[*]} $*" >&2
+
+exec "${runner[@]}" "$@"
