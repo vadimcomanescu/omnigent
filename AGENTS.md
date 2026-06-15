@@ -1,7 +1,16 @@
 # Omnigent Agent Notes
 
-This checkout backs local `omnigent` and `omni` commands through an editable
-`uv tool` install. Do not rerun the curl installer for local development.
+This repo has two different workflows. Keep them separate.
+
+For normal Omnigent development and upstream PR work, follow
+`CONTRIBUTING.md`: use the repo virtualenv, `uv sync --extra all --extra dev`,
+`uv run ...`, and the documented test/lint gates.
+
+For this machine's installed `omnigent` and `omni` commands, this checkout is
+installed as an editable `uv tool`. That is a local runtime adapter for testing
+the current branch through the globally available CLI; it is not a replacement
+for the contributor dev environment or upstream test gates. Do not rerun the
+curl installer for local development.
 
 Use the one repo-local procedure:
 
@@ -9,13 +18,17 @@ Use the one repo-local procedure:
 ./scripts/update.sh
 ```
 
-What it does:
+What `./scripts/update.sh` does:
 
 - On `main`, fast-forwards from `upstream/main`, then reinstalls the editable
   tool.
 - On any other branch, reinstalls the current checkout without syncing.
 - Verifies the installed CLI imports `omnigent`, `omnigent_client`, and
   `omnigent_ui_sdk` from this checkout.
+
+Branch rule: keep `main` as the upstream mirror, do fixes on feature branches,
+run `./scripts/update.sh` from the branch you want the global CLI/server to use,
+then rebase or fast-forward against `upstream/main` before proposing changes.
 
 If a server is already running, restart it after reinstalling:
 
@@ -40,5 +53,6 @@ omnigent codex
 omnigent claude --use-native-config
 ```
 
-Do not use bare `omnigent` for this machine service; it follows the local daemon
-path instead of targeting the shared server.
+For automation and smoke tests, do not rely on bare `omnigent`; depending on the
+current defaults, it may enter first-run/default-agent selection or the local
+daemon path. Use an explicit entry point instead.
