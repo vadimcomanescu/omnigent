@@ -2,6 +2,11 @@
 
 This repo has two different workflows. Keep them separate.
 
+This fork's default operating branch is `local/runtime-workflow`. Use that as
+the starting checkout for local agents and runtime instructions. Do not use it
+as the base for upstream PR code; upstream PR branches start from
+`upstream/main` as described below.
+
 For normal Omnigent development and upstream PR work, follow
 `CONTRIBUTING.md`: use the repo virtualenv, `uv sync --extra all --extra dev`,
 `uv run ...`, and the documented test/lint gates.
