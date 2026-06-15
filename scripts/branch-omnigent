@@ -21,6 +21,12 @@ Usage:
 Runs Omnigent from the current checkout/branch against the configured stable
 server without changing the installed global CLI or restarting omnigent.service.
 
+Start new patch/test branches from an up-to-date main first:
+  git fetch upstream main
+  git switch main
+  git merge --ff-only upstream/main
+  git switch -c fix/something
+
 Optional override:
   OMNIGENT_BRANCH_SERVER=http://server.example ./scripts/branch-omnigent codex
 USAGE

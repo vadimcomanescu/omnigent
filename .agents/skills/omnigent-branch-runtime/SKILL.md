@@ -10,6 +10,18 @@ description: Runs Omnigent from a feature branch against the stable local server
 Do not restart `omnigent.service` or run `./scripts/update.sh` for branch testing.
 Those commands promote the always-on server to the current branch.
 
+When applying a patch or starting new Omnigent work, start from an up-to-date
+upstream mirror unless the user explicitly says to continue the current branch:
+
+```bash
+git fetch upstream main
+git switch main
+git merge --ff-only upstream/main
+git switch -c fix/descriptive-name
+```
+
+Apply the patch or edit after creating that feature branch.
+
 For branch testing, run the branch as a separate host/client/runner against the
 stable server:
 
@@ -34,6 +46,9 @@ stable server:
 Test a patch from the branch:
 
 ```bash
+git fetch upstream main
+git switch main
+git merge --ff-only upstream/main
 git switch -c fix/something
 git apply /path/to/patch.diff
 uv sync --extra all --extra dev
