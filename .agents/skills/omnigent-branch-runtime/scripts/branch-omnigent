@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+command -v git >/dev/null || {
+  echo "ERROR: git is required" >&2
+  exit 1
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 cd "$ROOT"
 
 fail() {
@@ -12,27 +18,29 @@ fail() {
 usage() {
   cat >&2 <<'USAGE'
 Usage:
-  ./scripts/branch-omnigent host
-  ./scripts/branch-omnigent codex [args...]
-  ./scripts/branch-omnigent claude [args...]
-  ./scripts/branch-omnigent polly [args...]
-  ./scripts/branch-omnigent run [args...]
+  .agents/skills/omnigent-branch-runtime/scripts/branch-omnigent host
+  .agents/skills/omnigent-branch-runtime/scripts/branch-omnigent codex [args...]
+  .agents/skills/omnigent-branch-runtime/scripts/branch-omnigent claude [args...]
+  .agents/skills/omnigent-branch-runtime/scripts/branch-omnigent polly [args...]
+  .agents/skills/omnigent-branch-runtime/scripts/branch-omnigent run [args...]
 
 Runs Omnigent from the current checkout/branch against the configured stable
 server without changing the installed global CLI or restarting omnigent.service.
 
-Start new patch/test branches from an up-to-date main first:
+Start new patch/test branches from upstream/main, not from the current feature
+branch unless explicitly told to continue it:
   git fetch upstream main
   git switch main
   git merge --ff-only upstream/main
   git switch -c fix/something
 
+If the fast-forward fails, stop and ask.
+
 Optional override:
-  OMNIGENT_BRANCH_SERVER=http://server.example ./scripts/branch-omnigent codex
+  OMNIGENT_BRANCH_SERVER=http://server.example .agents/skills/omnigent-branch-runtime/scripts/branch-omnigent codex
 USAGE
 }
 
-command -v git >/dev/null || fail "git is required"
 command -v sha256sum >/dev/null || fail "sha256sum is required"
 
 [ -f pyproject.toml ] && grep -q '^name = "omnigent"$' pyproject.toml ||

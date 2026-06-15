@@ -10,8 +10,10 @@ description: Runs Omnigent from a feature branch against the stable local server
 Do not restart `omnigent.service` or run `./scripts/update.sh` for branch testing.
 Those commands promote the always-on server to the current branch.
 
-When applying a patch or starting new Omnigent work, start from an up-to-date
-upstream mirror unless the user explicitly says to continue the current branch:
+When applying a patch or starting new Omnigent work, the base branch is
+`upstream/main`. Do not branch from the current feature branch unless the user
+explicitly says to continue it. First switch local `main` to `upstream/main` by
+fast-forward only:
 
 ```bash
 git fetch upstream main
@@ -20,16 +22,17 @@ git merge --ff-only upstream/main
 git switch -c fix/descriptive-name
 ```
 
-Apply the patch or edit after creating that feature branch.
+If the fast-forward fails, stop and ask. Apply the patch or edit after creating
+that feature branch.
 
 For branch testing, run the branch as a separate host/client/runner against the
-stable server:
+stable server with this skill's bundled helper:
 
 ```bash
-./scripts/branch-omnigent host
-./scripts/branch-omnigent codex
-./scripts/branch-omnigent claude --use-native-config
-./scripts/branch-omnigent polly
+.agents/skills/omnigent-branch-runtime/scripts/branch-omnigent host
+.agents/skills/omnigent-branch-runtime/scripts/branch-omnigent codex
+.agents/skills/omnigent-branch-runtime/scripts/branch-omnigent claude --use-native-config
+.agents/skills/omnigent-branch-runtime/scripts/branch-omnigent polly
 ```
 
 ## What The Helper Does
@@ -52,7 +55,7 @@ git merge --ff-only upstream/main
 git switch -c fix/something
 git apply /path/to/patch.diff
 uv sync --extra all --extra dev
-./scripts/branch-omnigent host
+.agents/skills/omnigent-branch-runtime/scripts/branch-omnigent host
 ```
 
 Leave the host running, then choose that branch host in the web UI.
@@ -60,8 +63,8 @@ Leave the host running, then choose that branch host in the web UI.
 Start a branch CLI session:
 
 ```bash
-./scripts/branch-omnigent codex
-./scripts/branch-omnigent claude --use-native-config
+.agents/skills/omnigent-branch-runtime/scripts/branch-omnigent codex
+.agents/skills/omnigent-branch-runtime/scripts/branch-omnigent claude --use-native-config
 ```
 
 Promote only after deciding the stable server should run this branch:

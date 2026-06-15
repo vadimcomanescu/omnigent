@@ -35,8 +35,10 @@ then rebase or fast-forward against `upstream/main` before proposing changes.
 Do not restart `omnigent.service` just to test a branch. That promotes the
 always-on server to the branch.
 
-When applying a patch or starting new Omnigent work, start from an updated
-upstream mirror unless the user explicitly says to continue the current branch:
+When applying a patch or starting new Omnigent work, the base branch is
+`upstream/main`. Do not branch from the current feature branch unless the user
+explicitly says to continue it. First switch local `main` to `upstream/main` by
+fast-forward only:
 
 ```bash
 git fetch upstream main
@@ -45,22 +47,24 @@ git merge --ff-only upstream/main
 git switch -c fix/descriptive-name
 ```
 
-Then apply the patch or make the edit on that feature branch.
+If the fast-forward fails, stop and ask. Then apply the patch or make the edit
+on the new feature branch.
 
 For branch testing, run the current checkout as a separate host/client/runner
-against the configured stable server:
+against the configured stable server with the skill's bundled helper:
 
 ```bash
-./scripts/branch-omnigent host
-./scripts/branch-omnigent codex
-./scripts/branch-omnigent claude --use-native-config
-./scripts/branch-omnigent polly
+.agents/skills/omnigent-branch-runtime/scripts/branch-omnigent host
+.agents/skills/omnigent-branch-runtime/scripts/branch-omnigent codex
+.agents/skills/omnigent-branch-runtime/scripts/branch-omnigent claude --use-native-config
+.agents/skills/omnigent-branch-runtime/scripts/branch-omnigent polly
 ```
 
 The helper uses the repo `.venv` when present, otherwise `uv run`; it injects a
 branch-specific host identity, isolates daemon state, and refuses `server` so it
 cannot accidentally start a replacement server. The matching agent skill is in
-`.agents/skills/omnigent-branch-runtime/SKILL.md`.
+`.agents/skills/omnigent-branch-runtime/SKILL.md`; its scripts live under
+`.agents/skills/omnigent-branch-runtime/scripts/`.
 
 Use `./scripts/update.sh` plus `systemctl --user restart omnigent.service` only
 when the user explicitly asks to promote the always-on server to the current
