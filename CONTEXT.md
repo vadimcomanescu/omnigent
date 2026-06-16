@@ -16,17 +16,23 @@ on `main` and the task is not explicitly a mirror sync, switch to
 ## Sync-Only Requests
 
 When the user asks to pull, merge, or sync upstream, the task is to update the
-mirror branch and return to the local operating branch:
+mirror branch, merge it into the local operating branch, and stay on the local
+operating branch:
 
 ```bash
 git fetch upstream main
 git switch main
 git merge --ff-only upstream/main
 git switch local/runtime-workflow
+git merge --no-edit main
 ```
 
 Stop there unless the user explicitly asks to promote the runtime or validate a
 code change. Do not run dependency syncs or language gates for a mirror sync.
+
+This merge is required. Without it, `local/runtime-workflow` can keep an older
+`uv.lock`, and a later `uv sync` on the correct operating branch will downgrade
+the `.venv` to that older lockfile.
 
 ## Development Requests
 

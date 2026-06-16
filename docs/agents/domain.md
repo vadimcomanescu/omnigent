@@ -14,7 +14,8 @@ the local branch model:
 
 - `local/runtime-workflow` is the default local operating branch.
 - `main` is only the fast-forward mirror of `upstream/main`.
-- Sync-only work must return the checkout to `local/runtime-workflow`.
+- Sync-only work must merge the updated `main` into `local/runtime-workflow`
+  and leave the checkout on `local/runtime-workflow`.
 
 Do not treat a missing file on `main` as missing from the repo's local workflow.
 If a local procedure, helper, or skill is expected but absent, check whether the
@@ -22,4 +23,5 @@ checkout is on `main`; if so, switch back to `local/runtime-workflow` before
 continuing.
 
 Use `CONTRIBUTING.md` gates for actual code changes and upstream PR work. Do not
-run those gates merely to prove that `main` was fast-forwarded.
+run those gates merely to prove that `main` was fast-forwarded and merged into
+`local/runtime-workflow`.

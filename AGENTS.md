@@ -22,7 +22,9 @@ git switch local/runtime-workflow
 
 Do not leave this repo on `main` after a sync-only task. `main` exists to mirror
 `upstream/main`; it does not contain this fork's local operating procedures.
-After fast-forwarding `main`, return to `local/runtime-workflow`.
+After fast-forwarding `main`, return to `local/runtime-workflow` and merge
+`main` into it so the local operating branch keeps the current upstream code and
+lockfile.
 
 For normal Omnigent development and upstream PR work, follow
 `CONTRIBUTING.md`: use the repo virtualenv, `uv sync --extra all --extra dev`,
@@ -59,11 +61,12 @@ git fetch upstream main
 git switch main
 git merge --ff-only upstream/main
 git switch local/runtime-workflow
+git merge --no-edit main
 ```
 
 Do not run `uv sync`, `pytest`, `npm test`, `npm run lint`, or frontend builds
 for a sync-only request. Those are contributor validation gates for code
-changes, not proof that the mirror was fast-forwarded.
+changes, not proof that the mirror and local workflow branch were updated.
 
 ## Agent skills
 
