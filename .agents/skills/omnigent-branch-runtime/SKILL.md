@@ -89,6 +89,15 @@ git status --short --branch
 
 Report the mirror commit, merge commit, and clean status. Stop there.
 
+Close every sync-only task by asking exactly one follow-up question:
+
+```text
+Do you want me to promote the always-on Omnigent server to this branch now?
+```
+
+Do not run `./scripts/update.sh` or restart `omnigent.service` unless the user
+explicitly answers yes.
+
 Start a branch CLI session:
 
 ```bash
@@ -102,3 +111,6 @@ Promote only after deciding the stable server should run this branch:
 ./scripts/update.sh
 systemctl --user restart omnigent.service
 ```
+
+For branch-test closeout, ask whether to promote/restart before running those
+commands. Never infer promotion from a successful sync or branch test.
