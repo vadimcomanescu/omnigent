@@ -1,6 +1,6 @@
 ---
 name: omnigent-branch-runtime
-description: Runs Omnigent from a feature branch against the stable local server without promoting the server. Use when testing Omnigent patches, branch behavior, host/runner/client changes, or when the user says to test a branch without restarting omnigent.service.
+description: Syncs this Omnigent fork with upstream while preserving the local/runtime-workflow operating branch, and runs Omnigent from feature branches against the stable local server without promoting the server. Use when the user says to sync, pull, fetch, merge, or update from upstream; when testing Omnigent patches, branch behavior, host/runner/client changes; or when the user says to test a branch without restarting omnigent.service.
 ---
 
 # Omnigent Branch Runtime
