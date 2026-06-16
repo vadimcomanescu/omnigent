@@ -10,6 +10,11 @@ description: Runs Omnigent from a feature branch against the stable local server
 Do not restart `omnigent.service` or run `./scripts/update.sh` for branch testing.
 Those commands promote the always-on server to the current branch.
 
+This repo's local operating branch is `local/runtime-workflow`. `main` is only
+the fast-forward mirror of `upstream/main`. For sync-only tasks, return to
+`local/runtime-workflow` immediately after fast-forwarding `main`; do not leave
+the checkout on `main`.
+
 When applying a patch or starting new Omnigent work, the base branch is
 `upstream/main`. Do not branch from the current feature branch unless the user
 explicitly says to continue it. First switch local `main` to `upstream/main` by
@@ -24,6 +29,16 @@ git switch -c fix/descriptive-name
 
 If the fast-forward fails, stop and ask. Apply the patch or edit after creating
 that feature branch.
+
+For a sync-only task, do not create a feature branch and do not run contributor
+gates. Use this exact sequence:
+
+```bash
+git fetch upstream main
+git switch main
+git merge --ff-only upstream/main
+git switch local/runtime-workflow
+```
 
 For branch testing, run the branch as a separate host/client/runner against the
 stable server with this skill's bundled helper:
@@ -59,6 +74,18 @@ uv sync --extra all --extra dev
 ```
 
 Leave the host running, then choose that branch host in the web UI.
+
+Sync the upstream mirror without starting work:
+
+```bash
+git fetch upstream main
+git switch main
+git merge --ff-only upstream/main
+git switch local/runtime-workflow
+git status --short --branch
+```
+
+Report the mirror commit and clean status. Stop there.
 
 Start a branch CLI session:
 

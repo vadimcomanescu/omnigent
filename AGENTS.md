@@ -7,6 +7,23 @@ the starting checkout for local agents and runtime instructions. Do not use it
 as the base for upstream PR code; upstream PR branches start from
 `upstream/main` as described below.
 
+Start every local task by confirming the checkout:
+
+```bash
+git branch --show-current
+```
+
+If the current branch is `main` and the task is not explicitly "sync the
+upstream mirror", switch back before doing anything else:
+
+```bash
+git switch local/runtime-workflow
+```
+
+Do not leave this repo on `main` after a sync-only task. `main` exists to mirror
+`upstream/main`; it does not contain this fork's local operating procedures.
+After fast-forwarding `main`, return to `local/runtime-workflow`.
+
 For normal Omnigent development and upstream PR work, follow
 `CONTRIBUTING.md`: use the repo virtualenv, `uv sync --extra all --extra dev`,
 `uv run ...`, and the documented test/lint gates.
@@ -34,6 +51,36 @@ What `./scripts/update.sh` does:
 Branch rule: keep `main` as the upstream mirror, do fixes on feature branches,
 run `./scripts/update.sh` from the branch you want the global CLI/server to use,
 then rebase or fast-forward against `upstream/main` before proposing changes.
+
+For a sync-only request, do exactly this and stop:
+
+```bash
+git fetch upstream main
+git switch main
+git merge --ff-only upstream/main
+git switch local/runtime-workflow
+```
+
+Do not run `uv sync`, `pytest`, `npm test`, `npm run lint`, or frontend builds
+for a sync-only request. Those are contributor validation gates for code
+changes, not proof that the mirror was fast-forwarded.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub for this fork unless a task explicitly targets
+upstream. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default five-label triage vocabulary. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repo. Read `CONTEXT.md` first, especially the branch
+operating model. See `docs/agents/domain.md`.
 
 ## Branch Runtime Testing
 
