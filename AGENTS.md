@@ -130,11 +130,20 @@ cannot accidentally start a replacement server. The matching agent skill is in
 `.agents/skills/omnigent-branch-runtime/SKILL.md`; its scripts live under
 `.agents/skills/omnigent-branch-runtime/scripts/`.
 
-Use `./scripts/update.sh` plus `systemctl --user restart omnigent.service` only
-when the user explicitly asks to promote the always-on server to the current
-branch.
+Use `./scripts/update.sh` plus the service restart only when the user explicitly
+asks to promote the always-on server to the current branch. On this machine,
+prefer the local wrapper:
 
-If a server is already running, restart it after reinstalling:
+```bash
+~/.agents/scripts/omnigent-promote-current
+```
+
+It reinstalls the editable tool, restarts `omnigent.service`, resets the public
+host daemon, and verifies `/v1/hosts`. Do not restart the server without also
+resetting the public host daemon through the local-service procedure.
+
+If you must do it manually, restart the server after reinstalling, then follow
+`~/.agents/docs/local-services.md` to reset and verify the public host daemon:
 
 ```bash
 systemctl --user restart omnigent.service

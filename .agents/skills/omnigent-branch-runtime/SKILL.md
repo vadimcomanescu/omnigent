@@ -116,12 +116,24 @@ Start a branch CLI session:
 .agents/skills/omnigent-branch-runtime/scripts/branch-omnigent claude --use-native-config
 ```
 
-Promote only after deciding the stable server should run this branch:
+Promote only after deciding the stable server should run this branch. On this
+machine, use the local promotion wrapper so the public host daemon is reset
+after the server restart:
+
+```bash
+~/.agents/scripts/omnigent-promote-current
+```
+
+Manual fallback:
 
 ```bash
 ./scripts/update.sh
 systemctl --user restart omnigent.service
+omnigent host stop --server <configured-server> --daemon-only --force || true
+~/.agents/scripts/omnigent-public-host <configured-server>
 ```
 
 For branch-test closeout, ask whether to promote/restart before running those
-commands. Never infer promotion from a successful sync or branch test.
+commands. Never infer promotion from a successful sync or branch test. Never
+stop after only restarting `omnigent.service`; verify `/v1/hosts` shows
+`vadim-omarchy` online.
