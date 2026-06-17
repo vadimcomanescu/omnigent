@@ -5467,6 +5467,87 @@ async def test_stop_session_forwards_stop_session_event_to_runner(
     )
 
 
+async def test_stop_session_clears_stale_failed_status(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A successful explicit stop clears sticky failed state.
+
+    Native terminal failures are sticky against trailing ``idle`` so the
+    failure stays visible. But ``stop_session`` is a user recovery action: once
+    the runner accepts the hard stop, the session must no longer reload as
+    failed from stale ``last_task_error`` labels.
+    """
+    from omnigent.runtime import set_runner_client
+    from omnigent.server.routes import sessions as sessions_module
+
+    published: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.session_stream.publish",
+        lambda _session_id, event: published.append(event),
+    )
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        """Accept the stop control and ignore snapshot reads."""
+        if request.method == "POST":
+            return httpx.Response(204)
+        return httpx.Response(204)
+
+    fake_runner = httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler),
+        base_url="http://runner",
+    )
+    set_runner_client(fake_runner)
+    session_id: str | None = None
+    cache_after_stop: str | None = None
+    try:
+        agent = await create_test_agent(client)
+        session = await _create_session(
+            client,
+            agent["id"],
+            labels={
+                "omnigent.last_task_error_code": "runner_error",
+                "omnigent.last_task_error_message": "turn failed (status 204)",
+            },
+        )
+        session_id = session["id"]
+        sessions_module._session_status_cache[session_id] = "failed"
+
+        before = await client.get(f"/v1/sessions/{session_id}")
+        assert before.status_code == 200, before.text
+        assert before.json()["status"] == "failed"
+        assert before.json()["last_task_error"] == {
+            "code": "runner_error",
+            "message": "turn failed (status 204)",
+        }
+
+        resp = await client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={"type": "stop_session", "data": {}},
+        )
+        assert resp.status_code == 202, resp.text
+        assert resp.json() == {"queued": False}
+        cache_after_stop = sessions_module._session_status_cache.get(session_id)
+
+        after = await client.get(f"/v1/sessions/{session_id}")
+        assert after.status_code == 200, after.text
+    finally:
+        await fake_runner.aclose()
+        set_runner_client(None)
+        if session_id is not None:
+            sessions_module._session_status_cache.pop(session_id, None)
+
+    after_body = after.json()
+    assert after_body["status"] == "idle"
+    assert after_body["last_task_error"] is None
+    assert cache_after_stop == "idle"
+    assert any(
+        event.get("type") == "session.status" and event.get("status") == "idle"
+        for event in published
+    )
+
+
 @pytest.mark.parametrize(
     "failure_mode",
     [
