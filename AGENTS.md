@@ -54,7 +54,7 @@ Branch rule: keep `main` as the upstream mirror, do fixes on feature branches,
 run `./scripts/update.sh` from the branch you want the global CLI/server to use,
 then rebase or fast-forward against `upstream/main` before proposing changes.
 
-For a sync-only request, do exactly this and stop:
+For a sync-only request, do exactly this, including the fork push:
 
 ```bash
 git fetch upstream main
@@ -62,11 +62,20 @@ git switch main
 git merge --ff-only upstream/main
 git switch local/runtime-workflow
 git merge --no-edit main
+git push origin main local/runtime-workflow
+git status --short --branch
 ```
 
 Do not run `uv sync`, `pytest`, `npm test`, `npm run lint`, or frontend builds
 for a sync-only request. Those are contributor validation gates for code
-changes, not proof that the mirror and local workflow branch were updated.
+changes, not proof that the mirror, fork, and local workflow branch were
+updated.
+
+If the fork push is blocked because the local pre-push `gitleaks` hook scans
+mirrored upstream history, verify any new local commits with a narrow
+`gitleaks git --log-opts=...` scan. If those local commits are clean, complete
+the fork sync with `git push --no-verify origin main local/runtime-workflow`
+and report the bypass plainly.
 
 ## Agent skills
 

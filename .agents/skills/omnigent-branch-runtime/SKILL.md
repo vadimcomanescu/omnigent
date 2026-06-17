@@ -12,8 +12,9 @@ Those commands promote the always-on server to the current branch.
 
 This repo's local operating branch is `local/runtime-workflow`. `main` is only
 the fast-forward mirror of `upstream/main`. For sync-only tasks, fast-forward
-`main`, merge it into `local/runtime-workflow`, and leave the checkout on
-`local/runtime-workflow`. Do not leave the checkout on `main`.
+`main`, merge it into `local/runtime-workflow`, push both branches to `origin`,
+and leave the checkout on `local/runtime-workflow`. Do not leave the checkout
+on `main`.
 
 When applying a patch or starting new Omnigent work, the base branch is
 `upstream/main`. Do not branch from the current feature branch unless the user
@@ -31,7 +32,7 @@ If the fast-forward fails, stop and ask. Apply the patch or edit after creating
 that feature branch.
 
 For a sync-only task, do not create a feature branch and do not run contributor
-gates. Use this exact sequence:
+gates. Use this exact sequence, including the fork push:
 
 ```bash
 git fetch upstream main
@@ -39,6 +40,8 @@ git switch main
 git merge --ff-only upstream/main
 git switch local/runtime-workflow
 git merge --no-edit main
+git push origin main local/runtime-workflow
+git status --short --branch
 ```
 
 For branch testing, run the branch as a separate host/client/runner against the
@@ -84,10 +87,18 @@ git switch main
 git merge --ff-only upstream/main
 git switch local/runtime-workflow
 git merge --no-edit main
+git push origin main local/runtime-workflow
 git status --short --branch
 ```
 
-Report the mirror commit, merge commit, and clean status. Stop there.
+Report the mirror commit, merge commit, fork push result, and clean status.
+Stop there.
+
+If the fork push is blocked because the local pre-push `gitleaks` hook scans
+mirrored upstream history, verify any new local commits with a narrow
+`gitleaks git --log-opts=...` scan. If those local commits are clean, complete
+the fork sync with `git push --no-verify origin main local/runtime-workflow`
+and report the bypass plainly.
 
 Close every sync-only task by asking exactly one follow-up question:
 
