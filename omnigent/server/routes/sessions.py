@@ -4792,6 +4792,32 @@ def _publish_runner_recovered_status(session_id: str) -> None:
     session_stream.publish(session_id, event.model_dump())
 
 
+async def _clear_stopped_session_error_state(
+    session_id: str,
+    conversation_store: ConversationStore,
+) -> None:
+    """
+    Clear sticky failure state after a user-initiated session stop.
+
+    A normal ``failed`` → trailing ``idle`` transition stays sticky so users
+    can see turn failures. A successful explicit stop is different: it is a
+    recovery action that kills the wedged runner and leaves the session ready
+    for the next relaunch.
+
+    :param session_id: Session/conversation identifier.
+    :param conversation_store: Store used to clear durable failure labels.
+    """
+    await _persist_session_status_error_labels(session_id, None, conversation_store)
+    _session_status_cache[session_id] = "idle"
+    event = SessionStatusEvent(
+        type="session.status",
+        conversation_id=session_id,
+        status="idle",
+        error=None,
+    )
+    session_stream.publish(session_id, event.model_dump())
+
+
 def _publish_terminal_pending(session_id: str, pending: bool) -> None:
     """
     Publish a typed :class:`SessionTerminalPendingEvent` and update the
@@ -16233,9 +16259,12 @@ def create_sessions_router(
                 )
             # Stop is non-sticky: no persistent marker is written. The
             # runner tunnel dropping above flips ``runner_online`` to false
-            # honestly, and the next message auto-relaunches the session on
-            # its (still-online) host via the normal message-dispatch
-            # relaunch path below.
+            # honestly. Clear any prior terminal failure now that the user
+            # explicitly stopped the wedged run; otherwise the durable
+            # ``last_task_error`` labels and sticky failed cache keep reloads
+            # looking blocked even though the next message can relaunch the
+            # session on its (still-online) host via the normal dispatch path.
+            await _clear_stopped_session_error_state(session_id, conversation_store)
             return {"queued": False}
         if body.type == _APPROVAL_TYPE:
             # Deliver the verdict through the shared resolver: it
