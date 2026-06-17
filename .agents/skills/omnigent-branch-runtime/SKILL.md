@@ -118,7 +118,8 @@ Start a branch CLI session:
 
 Promote only after deciding the stable server should run this branch. On this
 machine, use the local promotion wrapper so the public host daemon is reset
-after the server restart:
+after the server restart and stale offline branch-test hosts are removed from
+the picker:
 
 ```bash
 ~/.agents/scripts/omnigent-promote-current
@@ -135,5 +136,5 @@ omnigent host stop --server <configured-server> --daemon-only --force || true
 
 For branch-test closeout, ask whether to promote/restart before running those
 commands. Never infer promotion from a successful sync or branch test. Never
-stop after only restarting `omnigent.service`; verify `/v1/hosts` shows
-`vadim-omarchy` online.
+stop after only restarting `omnigent.service`; verify `/v1/hosts` shows the
+primary host online and no stale offline branch hosts.

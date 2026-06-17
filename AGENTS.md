@@ -139,8 +139,10 @@ prefer the local wrapper:
 ```
 
 It reinstalls the editable tool, restarts `omnigent.service`, resets the public
-host daemon, and verifies `/v1/hosts`. Do not restart the server without also
-resetting the public host daemon through the local-service procedure.
+host daemon, prunes stale offline branch-test hosts from the local picker, and
+verifies `/v1/hosts`. Do not restart the server without also resetting the
+public host daemon through the local-service procedure. Promotion is not done if
+the host picker shows stale offline branch hosts.
 
 If you must do it manually, restart the server after reinstalling, then follow
 `~/.agents/docs/local-services.md` to reset and verify the public host daemon:
