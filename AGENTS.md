@@ -130,6 +130,21 @@ cannot accidentally start a replacement server. The matching agent skill is in
 `.agents/skills/omnigent-branch-runtime/SKILL.md`; its scripts live under
 `.agents/skills/omnigent-branch-runtime/scripts/`.
 
+Live verification cleanup is part of the task. If a temporary harness, agent,
+host, runner, session, worktree, shim, or process is created only to verify a
+fix, remove it before reporting done. For public server checks, verify both
+surfaces are clean:
+
+```bash
+curl -sS http://omnigent-om.nadicode.ai/v1/sessions
+ps -eo pid,ppid,stat,lstart,cmd | rg -i ' pi( |$)|/pi( |$)|throwaway|verification'
+```
+
+Archive or delete throwaway sessions through the server API, stop throwaway
+processes, and report any intentionally retained session or process by id. Do
+not leave one-off `pi`, Codex, Claude, or probe sessions in the public picker
+as a side effect of testing.
+
 Use `./scripts/update.sh` plus the service restart only when the user explicitly
 asks to promote the always-on server to the current branch. On this machine,
 prefer the local wrapper:

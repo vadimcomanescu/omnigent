@@ -138,3 +138,22 @@ For branch-test closeout, ask whether to promote/restart before running those
 commands. Never infer promotion from a successful sync or branch test. Never
 stop after only restarting `omnigent.service`; verify `/v1/hosts` shows the
 primary host online and no stale offline branch hosts.
+
+## Live Verification Cleanup
+
+Any throwaway harness, agent, host, runner, session, worktree, shim, or process
+created for verification must be cleaned up before closeout. This is part of the
+verification task.
+
+For public server checks, verify no throwaway sessions or local harness
+processes remain:
+
+```bash
+curl -sS http://omnigent-om.nadicode.ai/v1/sessions
+ps -eo pid,ppid,stat,lstart,cmd | rg -i ' pi( |$)|/pi( |$)|throwaway|verification'
+```
+
+Archive or delete throwaway sessions through the server API, stop throwaway
+processes, and report any intentionally retained process or session by id. Do
+not leave one-off `pi`, Codex, Claude, or probe sessions in the public picker
+after branch or live-server verification.
