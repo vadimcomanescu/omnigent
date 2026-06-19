@@ -2212,21 +2212,65 @@ def _find_spec_by_name(
     name: str,
 ) -> AgentSpec | None:
     """
-    Recursively search the spec tree for a sub-agent by name.
+    Resolve a sub-agent spec by name within the parent spec tree.
 
-    Sub-agent names are validated to be unique across the entire
-    spec tree, so this always finds at most one match.
+    Recursively searches ``spec.sub_agents`` (names are validated unique
+    across the tree, so at most one matches).
+
+    The one exception is the built-in ``__web_researcher`` sub-agent that
+    backs the ``web_fetch`` tool: ``WebFetchTool`` synthesizes its spec in
+    memory and appends it to the parent's live ``sub_agents`` list, but
+    that spec is never serialized into the parent's persisted bundle. A
+    child ``__web_researcher`` session boots by re-parsing the bundle
+    fresh (``runner/_entry.py`` spec resolver), so the researcher is
+    absent from the re-parsed tree and a plain search returns ``None``.
+    Every caller swaps to the resolved sub-spec only ``if ... is not
+    None`` and otherwise keeps the parent spec — which boots the child as
+    a full clone of the parent (runaway recursion via ``sys_session_send``
+    when the parent is a coordinator). To keep that fallback safe, the
+    researcher is reconstructed deterministically from the parent (the
+    same pure builder ``WebFetchTool`` uses) instead of returning ``None``.
 
     :param spec: The root agent spec to search.
     :param name: The sub-agent name to find,
         e.g. ``"researcher"``.
-    :returns: The matching sub-agent spec, or ``None`` if not
+    :returns: The matching sub-agent spec, the reconstructed
+        ``__web_researcher`` spec on a resolve-miss, or ``None`` if not
         found.
+    """
+    found = _search_sub_agent_tree(spec, name)
+    if found is not None:
+        return found
+    # Built-in web_fetch researcher: derived from the parent, never
+    # persisted in the bundle, so reconstruct it on a resolve-miss rather
+    # than letting callers fall back to the parent spec. Imported lazily to
+    # keep the tools layer off this module's import path.
+    from omnigent.tools.builtins.web_fetch import RESEARCHER_NAME, build_researcher_spec
+
+    if name == RESEARCHER_NAME:
+        return build_researcher_spec(spec)
+    return None
+
+
+def _search_sub_agent_tree(
+    spec: AgentSpec,
+    name: str,
+) -> AgentSpec | None:
+    """
+    Recursively search ``spec.sub_agents`` for a sub-agent named ``name``.
+
+    The pure tree search backing :func:`_find_spec_by_name`; kept separate
+    so the ``__web_researcher`` reconstruction in that function fires once
+    at the root rather than on every recursive frame.
+
+    :param spec: The agent spec whose sub-tree to search.
+    :param name: The sub-agent name to find.
+    :returns: The matching sub-agent spec, or ``None`` if not found.
     """
     for sa in spec.sub_agents:
         if sa.name == name:
             return sa
-        found = _find_spec_by_name(sa, name)
+        found = _search_sub_agent_tree(sa, name)
         if found is not None:
             return found
     return None
