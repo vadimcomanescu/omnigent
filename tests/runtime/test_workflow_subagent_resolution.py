@@ -10,7 +10,7 @@ Before the fix, :func:`_find_spec_by_name` returned ``None`` for that
 resolve-miss, and every swap site (``runner/app.py`` POST /v1/sessions,
 ``_run_turn_bg``, ``_resolve_session_spec_entry``,
 ``_resolve_harness_and_spawn_env``; ``server/routes/sessions.py``) swaps only
-``if ... is not None`` — so the child silently booted as a full clone of the
+``if ... is not None``, so the child silently booted as a full clone of the
 parent. When the parent is a coordinator, every ``__web_researcher`` became a
 coordinator clone that re-ran the whole panel: runaway recursion / fan-out via
 ``sys_session_send`` (the failure mode ``runner/app.py`` calls out by name).
@@ -33,7 +33,7 @@ from omnigent.tools.builtins.web_fetch import RESEARCHER_NAME, build_researcher_
 def _coordinator_parent() -> AgentSpec:
     """A coordinator-style parent as re-parsed from its persisted bundle.
 
-    Critically, it does NOT contain ``__web_researcher`` in ``sub_agents`` —
+    Critically, it does NOT contain ``__web_researcher`` in ``sub_agents`` --
     ``WebFetchTool`` only appends that spec in memory at runtime, and it is
     never serialized, so a fresh bundle parse lacks it. The ``panelist`` child
     stands in for the real sub-agents a grounded coordinator declares.
@@ -71,7 +71,7 @@ def test_web_researcher_resolves_to_lean_researcher_on_bundle_reparse() -> None:
     # The lean researcher, not the coordinator clone: capped iterations + one-shot.
     assert resolved.executor.max_iterations == 5, (
         f"expected the lean researcher (max_iterations=5), got "
-        f"{resolved.executor.max_iterations} — that is the parent's executor, "
+        f"{resolved.executor.max_iterations} -- that is the parent's executor, "
         "i.e. the child booted as a parent clone."
     )
     assert resolved.interaction.conversational is False

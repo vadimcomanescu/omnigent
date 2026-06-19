@@ -2225,7 +2225,7 @@ def _find_spec_by_name(
     fresh (``runner/_entry.py`` spec resolver), so the researcher is
     absent from the re-parsed tree and a plain search returns ``None``.
     Every caller swaps to the resolved sub-spec only ``if ... is not
-    None`` and otherwise keeps the parent spec — which boots the child as
+    None`` and otherwise keeps the parent spec, which boots the child as
     a full clone of the parent (runaway recursion via ``sys_session_send``
     when the parent is a coordinator). To keep that fallback safe, the
     researcher is reconstructed deterministically from the parent (the
