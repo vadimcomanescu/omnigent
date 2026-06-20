@@ -157,8 +157,10 @@ It reinstalls the editable tool, restarts `omnigent.service`, restarts the
 managed public host service, prunes stale offline branch-test hosts from the
 local picker, and verifies `/v1/hosts`. Do not restart the server without also
 restarting `omnigent-public-host.service` through the local-service procedure.
-Promotion is not done unless both services are active and the host picker shows
-the primary host online with no stale offline branch hosts.
+Promotion is not done unless both services are active, the public host watchdog
+timer is active, and the host picker shows the primary host online with no stale
+offline branch hosts. The watchdog is required because a host process can remain
+alive after the server-side tunnel disappears from `/v1/hosts`.
 
 If you must do it manually, restart the server after reinstalling, then follow
 `~/.agents/docs/local-services.md` to restart and verify the managed public host
@@ -167,7 +169,7 @@ service:
 ```bash
 systemctl --user restart omnigent.service
 systemctl --user restart omnigent-public-host.service
-systemctl --user is-active omnigent.service omnigent-public-host.service
+systemctl --user is-active omnigent.service omnigent-public-host.service omnigent-public-host-watchdog.timer
 ```
 
 ## Local Runtime Reference

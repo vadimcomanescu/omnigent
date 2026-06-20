@@ -131,15 +131,19 @@ Manual fallback:
 ./scripts/update.sh
 systemctl --user restart omnigent.service
 systemctl --user restart omnigent-public-host.service
-systemctl --user is-active omnigent.service omnigent-public-host.service
+systemctl --user is-active omnigent.service omnigent-public-host.service omnigent-public-host-watchdog.timer
 ```
 
 For branch-test closeout, ask whether to promote/restart before running those
 commands. Never infer promotion from a successful sync or branch test. Never
 start or restart the public host through a detached `omnigent host` launcher.
-The public host is part of the service graph, and promotion is incomplete unless
-`omnigent-public-host.service` is active and `/v1/hosts` shows the primary host
-online with no stale offline branch hosts.
+The public host is part of the service graph. The local watchdog timer is part
+of that graph too: it treats `/v1/hosts` as the truth and restarts
+`omnigent-public-host.service` if the process is still alive but the primary
+host disappears from the picker. Promotion is incomplete unless
+`omnigent-public-host.service` and `omnigent-public-host-watchdog.timer` are
+active and `/v1/hosts` shows the primary host online with no stale offline
+branch hosts.
 
 ## Live Verification Cleanup
 
