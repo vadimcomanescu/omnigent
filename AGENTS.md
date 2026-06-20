@@ -153,17 +153,21 @@ prefer the local wrapper:
 ~/.agents/scripts/omnigent-promote-current
 ```
 
-It reinstalls the editable tool, restarts `omnigent.service`, resets the public
-host daemon, prunes stale offline branch-test hosts from the local picker, and
-verifies `/v1/hosts`. Do not restart the server without also resetting the
-public host daemon through the local-service procedure. Promotion is not done if
-the host picker shows stale offline branch hosts.
+It reinstalls the editable tool, restarts `omnigent.service`, restarts the
+managed public host service, prunes stale offline branch-test hosts from the
+local picker, and verifies `/v1/hosts`. Do not restart the server without also
+restarting `omnigent-public-host.service` through the local-service procedure.
+Promotion is not done unless both services are active and the host picker shows
+the primary host online with no stale offline branch hosts.
 
 If you must do it manually, restart the server after reinstalling, then follow
-`~/.agents/docs/local-services.md` to reset and verify the public host daemon:
+`~/.agents/docs/local-services.md` to restart and verify the managed public host
+service:
 
 ```bash
 systemctl --user restart omnigent.service
+systemctl --user restart omnigent-public-host.service
+systemctl --user is-active omnigent.service omnigent-public-host.service
 ```
 
 ## Local Runtime Reference

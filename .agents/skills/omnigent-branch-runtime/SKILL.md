@@ -130,14 +130,16 @@ Manual fallback:
 ```bash
 ./scripts/update.sh
 systemctl --user restart omnigent.service
-omnigent host stop --server <configured-server> --daemon-only --force || true
-~/.agents/scripts/omnigent-public-host <configured-server>
+systemctl --user restart omnigent-public-host.service
+systemctl --user is-active omnigent.service omnigent-public-host.service
 ```
 
 For branch-test closeout, ask whether to promote/restart before running those
 commands. Never infer promotion from a successful sync or branch test. Never
-stop after only restarting `omnigent.service`; verify `/v1/hosts` shows the
-primary host online and no stale offline branch hosts.
+start or restart the public host through a detached `omnigent host` launcher.
+The public host is part of the service graph, and promotion is incomplete unless
+`omnigent-public-host.service` is active and `/v1/hosts` shows the primary host
+online with no stale offline branch hosts.
 
 ## Live Verification Cleanup
 
