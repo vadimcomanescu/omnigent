@@ -30,6 +30,12 @@ git merge --no-edit main
 Stop there unless the user explicitly asks to promote the runtime or validate a
 code change. Do not run dependency syncs or language gates for a mirror sync.
 
+If a sync or requested runtime promotion fails because upstream app code crashes
+or rejects the local machine environment, report the failure and stop. Do not
+commit an app-code workaround to `local/runtime-workflow`. Code fixes start
+from `upstream/main` through the upstream PR workflow. Machine dependency,
+service, and routing fixes stay under `~/.agents/` or the real system config.
+
 This merge is required. Without it, `local/runtime-workflow` can keep an older
 `uv.lock`, and a later `uv sync` on the correct operating branch will downgrade
 the `.venv` to that older lockfile.
@@ -53,6 +59,11 @@ Do not restart `omnigent.service` or run `./scripts/update.sh` as a side effect
 of inspecting or testing a branch. Those actions promote the global CLI/server
 runtime to the current checkout. Use them only when the user explicitly asks to
 promote the runtime.
+
+The local promotion wrapper refuses to promote net new app/test code changes
+added after the latest upstream sync merge on `local/runtime-workflow`. A guard
+failure means the work belongs on a fresh upstream PR branch, or in local
+machine infrastructure if the failure is a missing local dependency.
 
 ## Local Infrastructure Boundary
 

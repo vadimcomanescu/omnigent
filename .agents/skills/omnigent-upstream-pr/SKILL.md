@@ -9,6 +9,11 @@ Authoritative source: this repo's `CONTRIBUTING.md`. It states two hard rules,
 "Branch from `main`" and "Sign off your commits with `git commit -s`" (DCO),
 and asks you to open an issue first for larger changes.
 
+Use this workflow for bugs discovered while syncing, reinstalling, restarting,
+or promoting the local runtime. Do not land those bug fixes directly on
+`local/runtime-workflow`; that branch is the local operating branch, not the
+delivery branch for upstream code.
+
 ## Branch model (do not violate)
 
 - `upstream` = omnigent-ai/omnigent (fetch only; push DISABLED).

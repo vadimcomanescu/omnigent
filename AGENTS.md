@@ -30,6 +30,14 @@ For normal Omnigent development and upstream PR work, follow
 `CONTRIBUTING.md`: use the repo virtualenv, `uv sync --extra all --extra dev`,
 `uv run ...`, and the documented test/lint gates.
 
+If a sync, reinstall, restart, or promotion exposes an Omnigent code bug, do
+not patch `local/runtime-workflow` to get the machine unstuck. Capture the
+failure, report the exact command and logs, and use the upstream contribution
+workflow in `.agents/skills/omnigent-upstream-pr/SKILL.md` for any code fix.
+`local/runtime-workflow` is for local operating workflow, not emergency app
+patches. Machine dependency or service fixes belong in `~/.agents/docs/`,
+`~/.agents/scripts/`, or the actual system location.
+
 For this machine's installed `omnigent` and `omni` commands, this checkout is
 installed as an editable `uv tool`. That is a local runtime adapter for testing
 the current branch through the globally available CLI; it is not a replacement
@@ -161,6 +169,9 @@ Promotion is not done unless both services are active, the public host watchdog
 timer is active, and the host picker shows the primary host online with no stale
 offline branch hosts. The watchdog is required because a host process can remain
 alive after the server-side tunnel disappears from `/v1/hosts`.
+The wrapper refuses promotion when `local/runtime-workflow` has net new
+app/test code changes after the latest upstream sync merge. If that guard
+fires, stop and follow the upstream PR workflow instead of bypassing it.
 
 If you must do it manually, restart the server after reinstalling, then follow
 `~/.agents/docs/local-services.md` to restart and verify the managed public host

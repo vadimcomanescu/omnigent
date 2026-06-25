@@ -94,6 +94,12 @@ git status --short --branch
 Report the mirror commit, merge commit, fork push result, and clean status.
 Stop there.
 
+If the sync or a user-requested promotion exposes an Omnigent code bug, stop at
+the diagnosis. Do not patch `local/runtime-workflow` as a recovery branch. Code
+fixes must use the `omnigent-upstream-pr` workflow from `upstream/main`.
+Machine-only dependency and service fixes belong under `~/.agents/` or the
+actual system config.
+
 If the fork push is blocked because the local pre-push `gitleaks` hook scans
 mirrored upstream history, verify any new local commits with a narrow
 `gitleaks git --log-opts=...` scan. If those local commits are clean, complete
@@ -124,6 +130,11 @@ the picker:
 ```bash
 ~/.agents/scripts/omnigent-promote-current
 ```
+
+The wrapper refuses promotion when `local/runtime-workflow` has net new
+app/test code changes after the latest upstream sync merge. If it refuses,
+report the changed paths and switch to the upstream PR workflow instead of
+bypassing the guard.
 
 Manual fallback:
 
