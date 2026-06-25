@@ -35,6 +35,7 @@ from pathlib import Path
 
 import pytest
 
+import omnigent.runtime.harnesses.process_manager as process_manager
 from omnigent.runtime.harnesses import _HARNESS_MODULES
 from omnigent.runtime.harnesses.process_manager import (
     _AP_PID_FILE,
@@ -592,6 +593,30 @@ async def test_pids_holding_socket_returns_empty_for_missing(
     """
     nonexistent = short_tmp_parent / "no-such.sock"
     pids = await _pids_holding_socket(nonexistent)
+    assert pids == []
+
+
+async def test_pids_holding_socket_returns_empty_when_lsof_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    short_tmp_parent: Path,
+) -> None:
+    """A missing ``lsof`` executable does not abort orphan cleanup.
+
+    Production hosts are not guaranteed to have ``lsof`` installed.
+    The orphan sweep is best-effort, so a missing executable must
+    behave like "no PIDs found" rather than fail FastAPI startup.
+    """
+
+    async def missing_lsof(*args: object, **kwargs: object) -> None:
+        raise FileNotFoundError("lsof")
+
+    monkeypatch.setattr(
+        process_manager.asyncio,
+        "create_subprocess_exec",
+        missing_lsof,
+    )
+
+    pids = await _pids_holding_socket(short_tmp_parent / "conv-orphan.sock")
     assert pids == []
 
 
