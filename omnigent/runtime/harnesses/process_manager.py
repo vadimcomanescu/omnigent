@@ -1081,16 +1081,13 @@ async def _pids_holding_socket(socket_path: Path) -> list[int]:
     :returns: List of holding PIDs (often a single one — the
         bound runner).
     """
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "lsof",
-            "-t",
-            str(socket_path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-    except OSError:
-        return []
+    proc = await asyncio.create_subprocess_exec(
+        "lsof",
+        "-t",
+        str(socket_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
     stdout, _ = await proc.communicate()
     if proc.returncode != 0:
         return []
