@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -54,6 +55,27 @@ from omnigent.native_terminal import url_component
 
 _DEFAULT_CURSOR_COMMAND = "cursor-agent"
 _CURSOR_PATH_ENV = "OMNIGENT_CURSOR_PATH"
+#: cursor chat ids (used as ``external_session_id``) are canonical UUIDs, e.g.
+#: ``0ef42bbf-3b80-4bec-ac39-ca46531cbc47``. This id flows into two untrusted
+#: sinks — a filesystem path component (the cursor chat-store dir) and the
+#: ``cursor-agent --resume`` argv — so both callers validate against this strict
+#: 8-4-4-4-12 shape before use (stricter than codex's loose hex+dash guard,
+#: because we know cursor mints full UUIDs). Anything else can never reach a path
+#: or argv.
+_CURSOR_CHAT_ID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def is_valid_cursor_chat_id(chat_id: str | None) -> bool:
+    """Return whether *chat_id* is a well-formed cursor chat id (UUID shape).
+
+    Used to gate the persisted ``external_session_id`` before it is used as a
+    cursor store-path component or passed to ``cursor-agent --resume``.
+    """
+    return bool(chat_id) and _CURSOR_CHAT_ID_RE.fullmatch(chat_id) is not None
+
+
 _AGENT_NAME = "cursor-native-ui"
 _TERMINAL_NAME = "cursor"
 _TERMINAL_SESSION_KEY = "main"
@@ -88,12 +110,14 @@ class PreparedCursorTerminal:
         terminal was reused (the live-reattach path: prior chat is
         intact).
     :param cold_resumed: ``True`` when resuming an existing Omnigent
-        session whose terminal had already exited, so a *fresh*
-        ``cursor-agent`` TUI was launched with none of the prior turns.
-        Cursor records no resumable chat id, so this is genuinely a new
-        chat - distinct from a brand-new session (``resolved_session_id
-        is None``) and from a live reattach. Drives the honest
-        cold-resume stderr hint. Note: cursor deliberately treats
+        session whose terminal had already exited, so a new
+        ``cursor-agent`` TUI is launched. The forwarder persisted the
+        cursor chat id as ``external_session_id``, so the runner relaunches
+        with ``--resume <chatId>`` and the prior conversation is reloaded
+        (cursor reuses its chat store across ``--resume``). Distinct from a
+        brand-new session (``resolved_session_id is None``) and from a live
+        reattach. Drives the cold-resume stderr hint. Note: cursor
+        deliberately treats
         ``cold_resumed`` and ``reattached`` as mutually exclusive (the
         cold-resume path leaves ``reattached`` at its ``False`` default)
         - unlike ``claude_native`` which models them independently. This
@@ -107,6 +131,11 @@ class PreparedCursorTerminal:
     tmux_target: str | None
     reattached: bool
     cold_resumed: bool = False
+    #: The validated cursor chat id captured for this session, when a cold
+    #: resume will actually reload prior turns. ``None`` when no resumable id
+    #: was captured (first run, or the forwarder never persisted one), so the
+    #: cold resume genuinely starts a fresh chat — drives the honest hint.
+    resume_chat_id: str | None = None
 
 
 def _configured_cursor_command(env: Mapping[str, str]) -> str:
@@ -152,6 +181,22 @@ def build_cursor_launch(
     return NativeCursorLaunch(executable=executable, argv=[executable, *cursor_args])
 
 
+def _inject_mode_arg(
+    cursor_args: tuple[str, ...],
+    mode: str | None,
+) -> tuple[str, ...]:
+    """Return *cursor_args* with ``--mode <mode>`` prepended when appropriate.
+
+    No-op when *mode* is ``None`` or ``--mode`` / ``--plan`` is already present
+    in *cursor_args* (user-supplied value wins).
+    """
+    if mode is None:
+        return cursor_args
+    if any(arg in ("--mode", "--plan") or arg.startswith("--mode=") for arg in cursor_args):
+        return cursor_args
+    return ("--mode", mode, *cursor_args)
+
+
 def run_cursor_native(
     *,
     server: str | None,
@@ -159,6 +204,7 @@ def run_cursor_native(
     cursor_args: tuple[str, ...],
     resume_picker: bool = False,
     auto_open_conversation: bool = False,
+    mode: str | None = None,
 ) -> None:
     """
     Launch the Cursor TUI in an Omnigent terminal.
@@ -169,6 +215,8 @@ def run_cursor_native(
     :param resume_picker: ``True`` runs the cursor-native picker.
     :param auto_open_conversation: When ``True``, open the browser
         conversation URL after launch.
+    :param mode: Optional cursor-agent execution mode (``"plan"`` or ``"ask"``).
+        Injected as ``--mode <mode>`` unless already present in *cursor_args*.
     :returns: None after the terminal attach session ends.
     """
     _preflight_local_tools()
@@ -177,6 +225,7 @@ def run_cursor_native(
             "Cursor requires a resolved Omnigent server URL. The CLI should call "
             "_ensure_backend before run_cursor_native."
         )
+    effective_cursor_args = _inject_mode_arg(cursor_args, mode)
     with TemporaryDirectory(prefix="omnigent-cursor-native-") as tmpdir:
         spec_path = _materialize_cursor_agent_spec(Path(tmpdir))
         _run_with_remote_server(
@@ -184,7 +233,7 @@ def run_cursor_native(
             spec_path,
             session_id=session_id,
             resume_picker=resume_picker,
-            cursor_args=cursor_args,
+            cursor_args=effective_cursor_args,
             auto_open_conversation=auto_open_conversation,
         )
 
@@ -284,7 +333,15 @@ def _run_with_remote_server(
                 warn=lambda message: click.echo(message, err=True),
             )
             if prepared.cold_resumed:
-                echo_native_cold_resume_hint(agent_label="Cursor")
+                # Only promise restoration when a valid chat id was actually
+                # captured: then the runner injects ``--resume <chatId>`` and
+                # cursor (which reuses its chat store across ``--resume``)
+                # reloads the prior turns. With no captured id the runner injects
+                # nothing and cursor starts fresh, so the hint must say so.
+                echo_native_cold_resume_hint(
+                    agent_label="Cursor",
+                    restored=prepared.resume_chat_id is not None,
+                )
             await _attach_terminal_resource(prepared)
             if resolved_session_id is None:
                 echo_native_resume_hint(
@@ -327,6 +384,7 @@ async def _prepare_cursor_terminal_via_daemon(
         # running terminal below, so default both flags off here.
         reattached = False
         cold_resumed = False
+        resume_chat_id: str | None = None
         if session_id is None:
             if session_bundle is None:
                 raise click.ClickException("Creating a Cursor session requires a session bundle.")
@@ -363,14 +421,25 @@ async def _prepare_cursor_terminal_via_daemon(
                     tmux_target=existing_terminal.tmux_target,
                     reattached=True,
                 )
-            # Session exists but its terminal has exited. Cursor records no
-            # resumable chat id, so the launch below starts a fresh TUI with
-            # no prior turns. Flag it so the caller can say so honestly.
-            # Mutually exclusive with the reattach path above: we leave
-            # reattached at False here (unlike claude_native, which treats
-            # cold_resumed/reattached as independent). Safe because cursor
-            # never uses reattached for teardown ownership.
+            # Session exists but its terminal has exited. The forwarder
+            # persists the cursor chat id as external_session_id, so the
+            # runner's _auto_create_cursor_terminal will pass
+            # ``--resume <chatId>`` to cursor-agent and the TUI reloads
+            # the prior conversation. Flag cold_resumed so the caller can
+            # show an honest hint. Mutually exclusive with the reattach
+            # path above: we leave reattached at False here (unlike
+            # claude_native, which treats cold_resumed/reattached as
+            # independent). Safe because cursor never uses reattached for
+            # teardown ownership.
             cold_resumed = True
+            # The hint below should only promise "prior conversation resumed"
+            # when a valid chat id was actually captured; otherwise the runner
+            # injects no ``--resume`` and cursor starts fresh. Read it from the
+            # same session payload and validate it (the runner re-validates
+            # before use; this keeps the user-facing message honest).
+            ext = payload.get("external_session_id") if isinstance(payload, dict) else None
+            if isinstance(ext, str) and is_valid_cursor_chat_id(ext):
+                resume_chat_id = ext
             if persist_args:
                 _update_startup_progress(startup_progress, "Updating Cursor session...")
                 resp = await client.patch(
@@ -409,6 +478,7 @@ async def _prepare_cursor_terminal_via_daemon(
         tmux_target=terminal.tmux_target,
         reattached=reattached,
         cold_resumed=cold_resumed,
+        resume_chat_id=resume_chat_id,
     )
 
 
