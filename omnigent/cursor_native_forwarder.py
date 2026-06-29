@@ -42,6 +42,7 @@ from pathlib import Path
 import httpx
 
 from omnigent._native_post_delivery import post_may_have_been_delivered
+from omnigent.cursor_native_bridge import FORK_HISTORY_CLOSE_TAG, FORK_HISTORY_OPEN_TAG
 
 _logger = logging.getLogger(__name__)
 
@@ -101,6 +102,25 @@ _USER_QUERY_RE = re.compile(r"<user_query>(.*?)</user_query>", re.DOTALL)
 # before pasting into the TUI; cursor stores them inside the user_query, so
 # strip them from the mirrored bubble (the path is an internal bridge detail).
 _ATTACHMENT_MARKER_RE = re.compile(r"\[Attached:[^\]]*\]")
+# On a fork into cursor, the executor prepends the prior conversation to the
+# first user message, fenced in <omnigent_fork_history>…</omnigent_fork_history>
+# (cursor_native_bridge.wrap_fork_preamble). cursor stores it inside the
+# user_query; strip the whole block so the mirrored bubble shows only the user's
+# real text — the copied history already lives in the Omnigent timeline, so
+# echoing it here would duplicate it.
+#
+# The match is non-greedy so it stops at the FIRST close tag: that is always the
+# real one, because wrap_fork_preamble defangs any literal sentinels inside the
+# replayed transcript (so the block holds exactly one real open/close pair), and
+# stopping at the first close preserves a tag in the user's own message that
+# sits after it. The trailing alternative strips an UNTERMINATED open block (a
+# truncated paste with no close tag) to end-of-text, so it degrades gracefully
+# instead of mirroring the whole raw block.
+_FORK_HISTORY_RE = re.compile(
+    rf"{re.escape(FORK_HISTORY_OPEN_TAG)}.*?{re.escape(FORK_HISTORY_CLOSE_TAG)}"
+    rf"|{re.escape(FORK_HISTORY_OPEN_TAG)}.*",
+    re.DOTALL,
+)
 
 # When an in-pane ``/summarize`` finishes, cursor-agent collapses the prior
 # history into a single user blob whose plain-string ``content`` starts with
@@ -135,6 +155,23 @@ class _ForwardState:
     last_rowid: int = 0
     launch_epoch_ms: int = 0
     heartbeat_ms: int = 0
+
+
+@dataclass
+class _ModelMirrorState:
+    """In-memory dedupe for terminal→web model-change mirroring.
+
+    Not persisted: a supervisor restart re-posts the current ``lastUsedModel``
+    on the first poll (the server no-ops if it already matches), so the web pill
+    re-syncs after a restart without manual action.
+
+    :param observed: Most recent ``lastUsedModel`` seen in the meta row.
+    :param posted: Last model id already posted; the dedupe baseline (``None``
+        until the first observation is posted).
+    """
+
+    observed: str | None = None
+    posted: str | None = None
 
 
 def _read_state(bridge_dir: Path) -> _ForwardState:
@@ -417,7 +454,8 @@ def _unwrap_user_query(text: str) -> str | None:
     match = _USER_QUERY_RE.search(text)
     if match is None:
         return None
-    inner = _ATTACHMENT_MARKER_RE.sub("", _strip_control_chars(match.group(1)))
+    inner = _FORK_HISTORY_RE.sub("", _strip_control_chars(match.group(1)))
+    inner = _ATTACHMENT_MARKER_RE.sub("", inner)
     return inner.strip() or None
 
 
@@ -456,6 +494,122 @@ def _read_blob_rows(store_path: Path, last_rowid: int) -> list[tuple[int, str, o
         finally:
             con.close()
     return []
+
+
+def _read_last_used_model(store_path: Path) -> str | None:
+    """Return the chat's currently-selected model id, or ``None`` if unavailable.
+
+    cursor records the active model in the ``meta`` table under key ``"0"`` as a
+    hex-encoded JSON blob carrying ``lastUsedModel`` — the *base* model id (e.g.
+    ``"gpt-5.2"``, ``"claude-opus-4-6"``), the same namespace the curated picker
+    catalog (:func:`omnigent.cursor_native.cursor_base_model_options`) and the
+    ``/model`` picker use, so a mirrored value matches a picker option. It
+    updates in place whenever the user switches model in the TUI, so polling it
+    is how the web picker learns of a terminal-side switch (the reverse of
+    :func:`omnigent.cursor_native_bridge.inject_model_command`).
+
+    Opened ``mode=ro`` (with a plain-connection fallback) for the same
+    WAL-reading reason as :func:`_read_blob_rows`; only a SELECT is issued.
+
+    :param store_path: The cursor chat store to read.
+    :returns: The ``lastUsedModel`` id, or ``None`` when the meta row is absent,
+        not yet written, or malformed.
+    """
+    sql = "SELECT value FROM meta"
+    for uri, kw in ((f"file:{store_path}?mode=ro", {"uri": True}), (str(store_path), {})):
+        try:
+            con = sqlite3.connect(uri, timeout=5.0, **kw)
+        except sqlite3.Error:
+            continue
+        try:
+            rows = con.execute(sql).fetchall()
+        except sqlite3.Error:
+            continue
+        finally:
+            con.close()
+        for (value,) in rows:
+            model = _last_used_model_from_meta_value(value)
+            if model is not None:
+                return model
+        return None
+    return None
+
+
+def _last_used_model_from_meta_value(value: object) -> str | None:
+    """Decode one ``meta.value`` cell and return its ``lastUsedModel``, if any.
+
+    The cell is hex-encoded JSON text (cursor stores it that way); decode the
+    hex, parse the JSON, and pull a non-empty ``lastUsedModel`` string.
+    """
+    if isinstance(value, str):
+        try:
+            raw: bytes = bytes.fromhex(value)
+        except ValueError:
+            return None
+    elif isinstance(value, (bytes, bytearray)):
+        raw = bytes(value)
+    else:
+        return None
+    try:
+        obj = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    model = obj.get("lastUsedModel")
+    if isinstance(model, str) and model.strip():
+        return model.strip()
+    return None
+
+
+async def _post_model_change_if_new(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    state: _ModelMirrorState,
+    model: str | None,
+) -> None:
+    """Mirror the terminal-observed model to ``model_override``, deduped.
+
+    Posts ``external_model_change`` whenever the observed base model id differs
+    from what we last posted — *including the very first observation*. Unlike
+    claude-native (which seeds the first value without posting, because its pill
+    already falls back to a Claude-ish ``llmModel``), cursor must post the first
+    observation: a cursor-native session has no per-session llm model, so an
+    un-pinned session falls back to omnigent's default (e.g. "fable") in the Web
+    UI pill — meaningless for cursor. Surfacing the real model immediately fixes
+    that and makes the picker highlight correct from the first poll. Safe to
+    post the first value because cursor has no bind-time sticky-model handoff to
+    clobber (see ``nativeModelFamilyForSession`` in the web store — cursor is
+    not a native model family), and the server no-ops when the value already
+    matches ``model_override``.
+
+    Best-effort: a failed POST leaves ``posted`` behind ``observed`` so the next
+    poll retries.
+
+    :param client: Omnigent HTTP client.
+    :param session_id: Omnigent session/conversation id.
+    :param state: Per-session dedupe state, mutated in place.
+    :param model: Model id observed this poll, or ``None`` when the meta row
+        carried no usable id (does not clear a previously-observed value).
+    """
+    if model is not None:
+        state.observed = model
+    if state.observed is None or state.observed == state.posted:
+        return
+    try:
+        resp = await client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={"type": "external_model_change", "data": {"model": state.observed}},
+        )
+        resp.raise_for_status()
+        state.posted = state.observed
+    except httpx.HTTPError:
+        # Leave posted behind observed so the next poll retries.
+        _logger.warning(
+            "Failed to mirror cursor model change to session=%s; web picker may lag",
+            session_id,
+        )
 
 
 def _read_new_items(store_path: Path, last_rowid: int, agent_name: str) -> list[_MirrorItem]:
@@ -613,6 +767,73 @@ async def _post_external_compaction_status(
     resp.raise_for_status()
 
 
+async def _persist_native_compaction_item(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    store_path: Path,
+) -> None:
+    """Persist a compaction boundary item to the conversation store."""
+    resp = await client.get(
+        f"/v1/sessions/{session_id}/items",
+        params={"limit": 1, "order": "desc"},
+    )
+    resp.raise_for_status()
+    items = resp.json().get("data", [])
+    last_item_id = items[0]["id"] if items else f"compact_boundary_{session_id}"
+
+    compacted_messages = None
+    try:
+        rows = _read_blob_rows(store_path, 0)
+        msgs = []
+        for _rowid, _blob_id, raw_data in rows:
+            if isinstance(raw_data, (bytes, bytearray)):
+                try:
+                    raw_data = raw_data.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+            if not isinstance(raw_data, str):
+                continue
+            try:
+                obj = json.loads(raw_data)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(obj, dict):
+                continue
+            role = obj.get("role")
+            content = obj.get("content")
+            if role in ("user", "assistant") and content:
+                text = content if isinstance(content, str) else _content_text(content).strip()
+                if text:
+                    block_type = "input_text" if role == "user" else "output_text"
+                    msgs.append(
+                        {
+                            "type": "message",
+                            "role": role,
+                            "content": [{"type": block_type, "text": text}],
+                        }
+                    )
+        if msgs:
+            compacted_messages = msgs
+    except Exception:  # noqa: BLE001
+        _logger.debug("Failed to read cursor store for compaction persist", exc_info=True)
+
+    compaction_data = {
+        "summary": "[Cursor compaction — context was compacted via /summarize]",
+        "last_item_id": last_item_id,
+        "model": "unknown",
+        "token_count": 0,
+    }
+    if compacted_messages:
+        compaction_data["compacted_messages"] = compacted_messages
+
+    resp = await client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={"type": "compaction", "data": compaction_data},
+    )
+    resp.raise_for_status()
+
+
 async def forward_cursor_store_to_session(
     *,
     base_url: str,
@@ -665,6 +886,7 @@ async def forward_cursor_store_to_session(
     # Track whether the cursor chat id has been persisted as external_session_id
     # so the cold-resume path can pass ``--resume <chatId>`` to cursor-agent.
     chat_id_patched = False
+    model_state = _ModelMirrorState()
     timeout = httpx.Timeout(_POST_TIMEOUT_S)
     async with httpx.AsyncClient(
         base_url=base_url, headers=headers, auth=auth, timeout=timeout
@@ -708,6 +930,11 @@ async def forward_cursor_store_to_session(
                                 last_rowid = persisted.last_rowid
                             else:
                                 last_rowid = 0
+                                # A fresh store (cold resume) is a new chat:
+                                # reset the model dedupe so the new chat's
+                                # current model is re-posted (server no-ops if
+                                # unchanged).
+                                model_state = _ModelMirrorState()
                             _write_state(
                                 bridge_dir,
                                 _ForwardState(
@@ -773,6 +1000,19 @@ async def forward_cursor_store_to_session(
                                         "may linger; session=%s rowid=%s",
                                         session_id,
                                         item.rowid,
+                                        exc_info=True,
+                                    )
+                                try:
+                                    await _persist_native_compaction_item(
+                                        client,
+                                        session_id=session_id,
+                                        store_path=store_path,
+                                    )
+                                except Exception:  # noqa: BLE001
+                                    _logger.warning(
+                                        "cursor forwarder could not persist "
+                                        "compaction item; session=%s",
+                                        session_id,
                                         exc_info=True,
                                     )
                                 failed_rowid = failed_attempts = 0
@@ -873,6 +1113,16 @@ async def forward_cursor_store_to_session(
                                 last_rowid=last_rowid,
                                 launch_epoch_ms=launch_epoch_ms,
                             ),
+                        )
+                        # Mirror a terminal-side model switch (TUI ``/model``)
+                        # back to the web picker. Polled alongside messages so
+                        # the pill tracks the same cadence as the chat view.
+                        observed_model = await asyncio.to_thread(_read_last_used_model, store_path)
+                        await _post_model_change_if_new(
+                            client,
+                            session_id=session_id,
+                            state=model_state,
+                            model=observed_model,
                         )
             except asyncio.CancelledError:
                 raise

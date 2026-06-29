@@ -4,7 +4,9 @@ import asyncio
 import logging
 import mimetypes
 import os
+import re
 import tarfile
+import uuid
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -49,6 +51,9 @@ from omnigent.server.performance_metrics import (
     ServerPerformanceMetrics,
     publish_server_metrics_periodically,
     set_request_duration_for_access_log,
+    set_request_id_for_access_log,
+    set_request_session_id_for_access_log,
+    set_request_user_agent_for_access_log,
 )
 from omnigent.server.routes.builtin_agents import create_builtin_agents_router
 from omnigent.server.routes.comments import create_comments_router
@@ -77,6 +82,85 @@ from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.policy_store import PolicyStore
 
 _logger = logging.getLogger(__name__)
+
+
+def _is_pep440_version(version: str) -> bool:
+    """Return whether *version* can be parsed as a PEP 440 version."""
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        Version(version)
+    except InvalidVersion:
+        return False
+    return True
+
+
+def _metadata_omnigent_version() -> str:
+    """Return the omnigent version recorded in installed package metadata."""
+    from importlib.metadata import version as _pkg_version
+
+    return _pkg_version("omnigent")
+
+
+def _source_pyproject_version(start: Path | None = None) -> str | None:
+    """Return ``[project].version`` from a source checkout's ``pyproject.toml``."""
+    import tomllib
+
+    current = start or Path(__file__).resolve()
+    for parent in (current, *current.parents):
+        pyproject = parent / "pyproject.toml"
+        if not pyproject.is_file():
+            continue
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+            _logger.warning(
+                "could not read %s for server version fallback (%s)",
+                pyproject,
+                exc,
+            )
+            return None
+        project = data.get("project")
+        if not isinstance(project, dict) or project.get("name") != "omnigent":
+            continue
+        version = project.get("version")
+        if not isinstance(version, str) or not version:
+            return None
+        if not _is_pep440_version(version):
+            _logger.warning(
+                "pyproject version %r from %s is not PEP 440",
+                version,
+                pyproject,
+            )
+            return None
+        return version
+    return None
+
+
+def _server_version() -> str:
+    """Return the server version exposed to clients.
+
+    Source/editable installs can have placeholder package metadata such as
+    ``source``. Prefer the installed metadata when it is parseable, but fall
+    back to the source checkout's ``pyproject.toml`` version so local developer
+    servers still report a PEP 440 version.
+    """
+    version = _metadata_omnigent_version()
+    if _is_pep440_version(version):
+        return version
+    fallback = _source_pyproject_version()
+    if fallback is not None:
+        _logger.info(
+            "installed omnigent version %r is not PEP 440; using pyproject version %s",
+            version,
+            fallback,
+        )
+        return fallback
+    _logger.warning(
+        "installed omnigent version %r is not PEP 440 and no pyproject fallback was found",
+        version,
+    )
+    return version
 
 
 def _register_web_mimetypes() -> None:
@@ -108,6 +192,7 @@ _WEB_UI_DIST = Path(__file__).parent / "static" / "web-ui"
 _WEB_UI_HTML_CACHE_CONTROL = "no-cache"
 _WEB_UI_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable"
 _WEB_UI_STATIC_CACHE_CONTROL = "public, max-age=3600"
+_WEB_UI_API_FALLBACK_PREFIXES = frozenset({"api", "auth", "health", "v1"})
 _WEB_UI_GZIP_MINIMUM_SIZE = 1024
 _CLAUDE_NATIVE_AGENT_NAME = CLAUDE_NATIVE_CODING_AGENT.agent_name
 _CODEX_NATIVE_AGENT_NAME = CODEX_NATIVE_CODING_AGENT.agent_name
@@ -121,6 +206,7 @@ _KIMI_NATIVE_AGENT_NAME = KIMI_NATIVE_CODING_AGENT.agent_name
 _DEBBY_AGENT_NAME = "debby"
 _POLLY_AGENT_NAME = "polly"
 _UNMATCHED_ROUTE_TEMPLATE = "<unmatched>"
+_SESSION_PATH_RE = re.compile(r"/v1/sessions/([^/]+)")
 # polly's and debby's multi-file bundles are packaged under
 # omnigent.resources.examples (see pyproject package-data), so they resolve
 # in both a repo checkout and an installed wheel. The presence check in each
@@ -1287,19 +1373,35 @@ def create_app(
         call_next: _FastAPICallNext,
     ) -> Response:
         """
-        Count each HTTP request while it is being processed.
+        Count each HTTP request and enrich access logs.
+
+        Generates a per-request correlation ID, captures the
+        ``User-Agent`` header and session ID from the URL path, and
+        stores them in context variables for the Uvicorn access
+        formatter.
 
         :param request: Incoming FastAPI request, e.g. ``GET /health``.
         :param call_next: FastAPI middleware continuation that executes
             the matched route and returns its response.
         :returns: The downstream route response.
         """
+        request_id = uuid.uuid4().hex
+        set_request_id_for_access_log(request_id)
+        set_request_user_agent_for_access_log(
+            request.headers.get("user-agent"),
+        )
+        session_match = _SESSION_PATH_RE.search(request.url.path)
+        set_request_session_id_for_access_log(
+            session_match.group(1) if session_match else None,
+        )
+
         failed = False
         status_code: int | None = None
         started_at = server_metrics.request_started()
         try:
             response = await call_next(request)
             status_code = response.status_code
+            response.headers["X-Request-Id"] = request_id
             return response
         except Exception:
             failed = True
@@ -1422,6 +1524,31 @@ def create_app(
             return {h for h in host_ids if host_registry.get(h) is not None}
         return host_store.online_host_ids(host_ids)
 
+    def _bulk_host_versions(host_ids: list[str]) -> dict[str, str]:
+        """
+        Map each requested host_id to the version from its live hello frame.
+
+        Resolved from the in-memory host registry only: the host version
+        isn't persisted to the hosts table, so a host connected to another
+        replica (multi-replica ``host_store`` deploys) is absent here and
+        the caller reports ``host_version=None`` for that session — the info
+        popover then simply omits the host version. Single-server /
+        single-replica deploys (the common case) resolve it fully. The
+        registry lookup is an in-memory dict read, so this stays off the
+        DB hot path the surrounding bulk liveness query optimizes.
+
+        :param host_ids: Bound host identifiers to resolve, e.g.
+            ``["host_abc123"]``. Empty input returns an empty map.
+        :returns: ``{host_id: version}`` for every id with a live local
+            tunnel; ids without one are absent.
+        """
+        versions: dict[str, str] = {}
+        for host_id in set(host_ids):
+            host_conn = host_registry.get(host_id)
+            if host_conn is not None:
+                versions[host_id] = host_conn.hello.version
+        return versions
+
     def _session_liveness(sid: str) -> SessionLiveness:
         """
         Resolve strict runner + host liveness for one session.
@@ -1495,6 +1622,7 @@ def create_app(
             conn.host_id for conn in connectivity.values() if conn.host_id is not None
         }
         online_hosts = _bulk_hosts_online(list(host_ids_to_check))
+        host_versions = _bulk_host_versions(list(host_ids_to_check))
         result: dict[str, SessionLiveness] = {}
         for sid in ids:
             conn = connectivity.get(sid)
@@ -1505,8 +1633,10 @@ def create_app(
                 continue
             if conn.host_id is None:
                 host_online: bool | None = None
+                host_version: str | None = None
             else:
                 host_online = conn.host_id in online_hosts
+                host_version = host_versions.get(conn.host_id)
             if conn.runner_id is None:
                 # No runner binding: an in-process executor (or a session
                 # not yet dispatched) is reachable — EXCEPT an unbound fork
@@ -1519,7 +1649,11 @@ def create_app(
                 # Strict: reachable only if the runner tunnel is up. No
                 # host-relaunch optimism — host state lives in host_online.
                 runner_online = _runner_up(conn)
-            result[sid] = SessionLiveness(runner_online=runner_online, host_online=host_online)
+            result[sid] = SessionLiveness(
+                runner_online=runner_online,
+                host_online=host_online,
+                host_version=host_version,
+            )
         return result
 
     @app.get("/health")
@@ -1549,8 +1683,11 @@ def create_app(
             ``"conv_abc,conv_def,conv_ghi"``.
         :returns: ``{"status": "ok"}`` with optional ``session``
             and/or ``sessions`` fields. Each session object has shape
-            ``{"runner_online": bool, "host_online": bool | None}``
-            (the single ``session`` object also includes its ``id``).
+            ``{"runner_online": bool, "host_online": bool | None,
+            "host_version": str | None}`` (the single ``session``
+            object also includes its ``id``). ``host_version`` is the
+            bound host's reported version, or ``None`` when there's no
+            host binding / the version isn't resolvable on this replica.
         """
         result: dict[str, Any] = {"status": "ok"}
         batch_ids = [s.strip() for s in session_ids.split(",") if s.strip()] if session_ids else []
@@ -1574,12 +1711,14 @@ def create_app(
                 "id": session_id,
                 "runner_online": single.runner_online,
                 "host_online": single.host_online,
+                "host_version": single.host_version,
             }
         if session_ids is not None:
             result["sessions"] = {
                 sid: {
                     "runner_online": (sl := liveness.get(sid, _missing)).runner_online,
                     "host_online": sl.host_online,
+                    "host_version": sl.host_version,
                 }
                 for sid in batch_ids
             }
@@ -1595,9 +1734,7 @@ def create_app(
         :returns: ``{"version": "<semver string>"}``,
             e.g. ``{"version": "0.1.0"}``.
         """
-        from importlib.metadata import version as _pkg_version
-
-        return {"version": _pkg_version("omnigent")}
+        return {"version": _server_version()}
 
     @app.get("/v1/info")
     async def info() -> dict[str, bool | str | None]:
@@ -1619,9 +1756,10 @@ def create_app(
         source, the login URL, whether first-run admin setup is
         still pending (``needs_setup``), coarse capability
         booleans (``databricks_features``,
-        ``managed_sandboxes_enabled``), and the short sandbox
+        ``managed_sandboxes_enabled``), the short sandbox
         provider name (``sandbox_provider``) the web UI labels the
-        new-session sandbox option with.
+        new-session sandbox option with, and the installed
+        ``server_version`` (already public via ``/api/version``).
         """
         from omnigent.server.auth import UnifiedAuthProvider
 
@@ -1663,6 +1801,22 @@ def create_app(
         # actually offered; None when no provider is named (embedding
         # configs may leave it unset) so the UI keeps the generic label.
         sandbox_provider = sandbox_config.provider if managed_sandboxes_enabled else None
+        # server_version is the installed omnigent package version (same
+        # source as /api/version), surfaced so the web UI can show it in the
+        # session info popover alongside the per-session host version.
+        # smart_routing_enabled: true when the server can route — either
+        # a RoutingClient is explicitly configured (OMNIGENT_SMART_ROUTING=1
+        # + llm: config) or the managed deployment registered a
+        # policy_llm_connection_factory (which means it has LLM capability
+        # and will supply its own RoutingClient).
+        try:
+            from omnigent.runtime._globals import _caps
+
+            smart_routing_enabled = _caps is not None and (
+                _caps.routing_client is not None or _caps.policy_llm_connection_factory is not None
+            )
+        except ImportError:
+            smart_routing_enabled = False
         return {
             "accounts_enabled": accounts_enabled,
             "login_url": login_url,
@@ -1670,6 +1824,8 @@ def create_app(
             "databricks_features": databricks_features,
             "managed_sandboxes_enabled": managed_sandboxes_enabled,
             "sandbox_provider": sandbox_provider,
+            "server_version": _server_version(),
+            "smart_routing_enabled": smart_routing_enabled,
         }
 
     @app.get("/v1/me", response_model=None)  # Union return type (dict | JSONResponse)
@@ -2070,9 +2226,9 @@ def create_app(
                 tags=["auth"],
             )
 
-    # Mount the built ap-web SPA at "/" if a build is present. The SPA is
-    # built into ``omnigent/server/static/web-ui/`` by ``ap-web/``'s Vite
-    # build (see ``ap-web/vite.config.ts`` ``build.outDir``). The mount is
+    # Mount the built web SPA at "/" if a build is present. The SPA is
+    # built into ``omnigent/server/static/web-ui/`` by ``web/``'s Vite
+    # build (see ``web/vite.config.ts`` ``build.outDir``). The mount is
     # registered AFTER all API routers so router routes win on overlap.
     # Skipping the mount when no build is present keeps API-only
     # deployments working (and ``/`` 404s cleanly instead of exploding at
@@ -2136,11 +2292,11 @@ class _SPAStaticFiles(StaticFiles):
     for the literal root and directory paths, so a refresh on
     ``/c/abc`` would 404.
 
-    The fallback is gated by an extension check: a path with a file
-    extension (``.js``, ``.css``, ``.png``, ``.woff2``, …) is treated as
-    an asset request and a 404 is returned verbatim — that surfaces
-    real broken-asset bugs rather than masking them with the HTML
-    shell. Extensionless paths fall back to ``index.html``.
+    The fallback is gated by an API-prefix and extension check: unmatched
+    ``/v1`` / ``/api`` / ``/auth`` / ``/health`` paths return a JSON 404,
+    and a path with a file extension (``.js``, ``.css``, ``.png``,
+    ``.woff2``, …) returns the static 404 verbatim. Other extensionless
+    paths fall back to ``index.html``.
     """
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -2161,12 +2317,39 @@ class _SPAStaticFiles(StaticFiles):
         try:
             response = await super().get_response(path, scope)
         except StarletteHTTPException as exc:
+            if exc.status_code == 404 and _is_web_ui_api_fallback_path(path):
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "error": {
+                            "code": ErrorCode.NOT_FOUND,
+                            "message": "Not found",
+                        }
+                    },
+                )
             if exc.status_code == 404 and "." not in path.rsplit("/", 1)[-1]:
                 served_path = "index.html"
                 response = await super().get_response("index.html", scope)
             else:
                 raise
         return _apply_web_ui_cache_headers(response, served_path)
+
+
+def _is_web_ui_api_fallback_path(path: str) -> bool:
+    """
+    Return whether an unmatched static path belongs to the API namespace.
+
+    The web UI is mounted at ``/`` and receives every unmatched request after
+    the routers. Without this guard, an unknown API route such as
+    ``/v1/sessions/x/codex_goal`` is served the SPA shell as ``200 text/html``,
+    which makes browser clients fail with a JSON parse error instead of a
+    route-level 404.
+
+    :param path: Static mount-relative path, e.g. ``"v1/sessions/x"``.
+    :returns: True for paths that should never fall back to ``index.html``.
+    """
+    first_segment = path.lstrip("/").split("/", 1)[0]
+    return first_segment in _WEB_UI_API_FALLBACK_PREFIXES
 
 
 class _RangeAwareGZipMiddleware(GZipMiddleware):

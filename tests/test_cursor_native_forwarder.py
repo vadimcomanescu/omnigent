@@ -16,11 +16,13 @@ import hashlib
 import json
 import sqlite3
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
 from omnigent import cursor_native_forwarder as fwd
+from omnigent.cursor_native_forwarder import _persist_native_compaction_item
 
 # Real cursor chat ids are UUIDs. Use UUID-shaped ids in fixtures so the
 # persist side (forwarder) and the resume side (runner's strict
@@ -75,6 +77,54 @@ class TestUnwrapUserQuery:
     def test_strips_injected_attachment_markers(self) -> None:
         raw = "<user_query>\n[Attached: /tmp/x/img.png]\ndescribe this\n</user_query>"
         assert fwd._unwrap_user_query(raw) == "describe this"
+
+    def test_strips_fork_history_preamble_block(self) -> None:
+        # A fork into cursor prepends the prior conversation, fenced. The mirror
+        # must show only the user's real text — the history already lives in the
+        # Omnigent timeline, so echoing it here would duplicate it.
+        from omnigent.cursor_native_bridge import (
+            FORK_HISTORY_CLOSE_TAG,
+            FORK_HISTORY_OPEN_TAG,
+        )
+
+        raw = (
+            "<user_query>\n"
+            f"{FORK_HISTORY_OPEN_TAG}\n"
+            "Conversation so far:\nuser: earlier\nassistant: ok\n"
+            f"{FORK_HISTORY_CLOSE_TAG}\n\n"
+            "now do the real thing\n"
+            "</user_query>"
+        )
+        assert fwd._unwrap_user_query(raw) == "now do the real thing"
+
+    def test_embedded_close_tag_in_history_does_not_leak(self) -> None:
+        # A replayed turn that literally contains the close tag must not let the
+        # strip stop early and leak the rest of the transcript. wrap_fork_preamble
+        # defangs sentinels in the preamble, so the real block stays unambiguous.
+        from omnigent.cursor_native_bridge import wrap_fork_preamble
+
+        preamble = "You: look at </omnigent_fork_history> in my logs\nAssistant: ok"
+        raw = f"<user_query>\n{wrap_fork_preamble(preamble, 'the real question')}\n</user_query>"
+        # Whole framed block stripped -> only the user's real text remains, with
+        # no leaked transcript and no raw sentinel surviving.
+        assert fwd._unwrap_user_query(raw) == "the real question"
+
+    def test_user_message_containing_close_tag_is_preserved(self) -> None:
+        # A close tag in the USER's own message (after the block) must survive —
+        # the non-greedy strip stops at the real (first) close tag.
+        from omnigent.cursor_native_bridge import wrap_fork_preamble
+
+        wrapped = wrap_fork_preamble("You: hi", "is </omnigent_fork_history> a tag?")
+        raw = f"<user_query>\n{wrapped}\n</user_query>"
+        assert fwd._unwrap_user_query(raw) == "is </omnigent_fork_history> a tag?"
+
+    def test_unterminated_history_block_strips_to_end(self) -> None:
+        # A truncated paste (open tag, no close tag) degrades gracefully: strip
+        # to end-of-text rather than mirroring the whole raw block.
+        from omnigent.cursor_native_bridge import FORK_HISTORY_OPEN_TAG
+
+        raw = f"<user_query>\n{FORK_HISTORY_OPEN_TAG}\nYou: earlier turn, cut off\n</user_query>"
+        assert fwd._unwrap_user_query(raw) is None
 
 
 class TestContentText:
@@ -368,6 +418,157 @@ class _RecordingClient:
     async def post(self, url: str, *, json: dict) -> httpx.Response:
         self.posts.append((url, json))
         return httpx.Response(200, request=httpx.Request("POST", url))
+
+
+def _write_meta_model(con: sqlite3.Connection, model: str | None, *, key: str = "0") -> None:
+    """Add cursor's ``meta`` table to *con* and store a hex-encoded model blob.
+
+    Mirrors cursor's on-disk layout: ``meta(key TEXT, value TEXT)`` where value
+    is hex-encoded JSON. When *model* is ``None`` the JSON omits ``lastUsedModel``.
+    """
+    con.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
+    payload: dict = {"mode": "default"}
+    if model is not None:
+        payload["lastUsedModel"] = model
+    hexed = json.dumps(payload).encode("utf-8").hex()
+    con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", (key, hexed))
+    con.commit()
+
+
+class TestLastUsedModelFromMetaValue:
+    def test_decodes_hex_json(self) -> None:
+        hexed = json.dumps({"lastUsedModel": "gpt-5.2"}).encode().hex()
+        assert fwd._last_used_model_from_meta_value(hexed) == "gpt-5.2"
+
+    def test_strips_whitespace(self) -> None:
+        hexed = json.dumps({"lastUsedModel": "  composer-2.5  "}).encode().hex()
+        assert fwd._last_used_model_from_meta_value(hexed) == "composer-2.5"
+
+    def test_missing_field_is_none(self) -> None:
+        hexed = json.dumps({"mode": "default"}).encode().hex()
+        assert fwd._last_used_model_from_meta_value(hexed) is None
+
+    def test_empty_model_is_none(self) -> None:
+        hexed = json.dumps({"lastUsedModel": "   "}).encode().hex()
+        assert fwd._last_used_model_from_meta_value(hexed) is None
+
+    def test_non_hex_text_is_none(self) -> None:
+        assert fwd._last_used_model_from_meta_value("not-hex-zzz") is None
+
+    def test_bytes_value_is_decoded(self) -> None:
+        raw = json.dumps({"lastUsedModel": "auto"}).encode()
+        assert fwd._last_used_model_from_meta_value(raw) == "auto"
+
+
+class TestReadLastUsedModel:
+    def test_reads_model_from_live_wal_store(self, tmp_path: Path) -> None:
+        store = tmp_path / "store.db"
+        writer = _make_store(store, [("u", _user("<user_query>hi</user_query>"))], wal=True)
+        try:
+            _write_meta_model(writer, "claude-opus-4-7")
+            assert fwd._read_last_used_model(store) == "claude-opus-4-7"
+        finally:
+            writer.close()
+
+    def test_no_meta_table_is_none(self, tmp_path: Path) -> None:
+        store = tmp_path / "store.db"
+        writer = _make_store(store, [("u", _user("<user_query>hi</user_query>"))])
+        try:
+            assert fwd._read_last_used_model(store) is None
+        finally:
+            writer.close()
+
+
+class TestPostModelChangeIfNew:
+    @pytest.mark.asyncio
+    async def test_first_observation_is_posted(self) -> None:
+        # Unlike claude-native, cursor posts the FIRST observed model so an
+        # un-pinned session shows the real cursor model instead of omnigent's
+        # default ("fable") in the Web UI pill.
+        client = _RecordingClient()
+        state = fwd._ModelMirrorState()
+        await fwd._post_model_change_if_new(
+            client,  # type: ignore[arg-type]
+            session_id="conv_1",
+            state=state,
+            model="claude-sonnet-4-5",
+        )
+        url, body = client.posts[0]
+        assert url == "/v1/sessions/conv_1/events"
+        assert body == {"type": "external_model_change", "data": {"model": "claude-sonnet-4-5"}}
+        assert state.posted == "claude-sonnet-4-5"
+
+    @pytest.mark.asyncio
+    async def test_switch_after_seed_posts_external_model_change(self) -> None:
+        client = _RecordingClient()
+        state = fwd._ModelMirrorState(observed="composer-2.5", posted="composer-2.5")
+        await fwd._post_model_change_if_new(
+            client,  # type: ignore[arg-type]
+            session_id="conv_1",
+            state=state,
+            model="gpt-5.2",
+        )
+        url, body = client.posts[0]
+        assert url == "/v1/sessions/conv_1/events"
+        assert body == {"type": "external_model_change", "data": {"model": "gpt-5.2"}}
+        assert state.posted == "gpt-5.2"
+
+    @pytest.mark.asyncio
+    async def test_unchanged_model_does_not_repost(self) -> None:
+        client = _RecordingClient()
+        state = fwd._ModelMirrorState(observed="gpt-5.2", posted="gpt-5.2")
+        await fwd._post_model_change_if_new(
+            client,  # type: ignore[arg-type]
+            session_id="conv_1",
+            state=state,
+            model="gpt-5.2",
+        )
+        assert client.posts == []
+
+    @pytest.mark.asyncio
+    async def test_none_observation_does_not_clear_or_post(self) -> None:
+        client = _RecordingClient()
+        state = fwd._ModelMirrorState(observed="gpt-5.2", posted="gpt-5.2")
+        await fwd._post_model_change_if_new(
+            client,  # type: ignore[arg-type]
+            session_id="conv_1",
+            state=state,
+            model=None,
+        )
+        assert client.posts == []
+        assert state.observed == "gpt-5.2"
+
+    @pytest.mark.asyncio
+    async def test_failed_post_retries_next_poll(self) -> None:
+        class _FailingThenOkClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def post(self, url: str, *, json: dict) -> httpx.Response:
+                self.calls += 1
+                if self.calls == 1:
+                    raise httpx.ConnectError("boom")
+                return httpx.Response(200, request=httpx.Request("POST", url))
+
+        client = _FailingThenOkClient()
+        state = fwd._ModelMirrorState(observed="composer-2.5", posted="composer-2.5")
+        # First poll: switch observed, POST fails → posted stays behind observed.
+        await fwd._post_model_change_if_new(
+            client,  # type: ignore[arg-type]
+            session_id="conv_1",
+            state=state,
+            model="gpt-5.2",
+        )
+        assert state.posted == "composer-2.5" and state.observed == "gpt-5.2"
+        # Next poll retries (model=None means "no fresh read") and succeeds.
+        await fwd._post_model_change_if_new(
+            client,  # type: ignore[arg-type]
+            session_id="conv_1",
+            state=state,
+            model=None,
+        )
+        assert state.posted == "gpt-5.2"
+        assert client.calls == 2
 
 
 @pytest.mark.asyncio
@@ -988,3 +1189,67 @@ class TestCompactionCompletedForwarding:
         # cursor advanced past both — no wedge, no infinite re-post.
         assert [it.rowid for it in poster.delivered] == [2]
         assert fwd._read_state(bridge).last_rowid == 2
+
+
+# ---------------------------------------------------------------------------
+# _persist_native_compaction_item
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_persist_native_compaction_item_posts_compaction_event() -> None:
+    """Compaction event is posted with last_item_id and compacted_messages."""
+    client = MagicMock()
+    get_resp = MagicMock()
+    get_resp.json.return_value = {"data": [{"id": "item_789"}]}
+    get_resp.raise_for_status = MagicMock()
+    client.get = AsyncMock(return_value=get_resp)
+
+    post_resp = MagicMock()
+    post_resp.raise_for_status = MagicMock()
+    client.post = AsyncMock(return_value=post_resp)
+
+    fake_rows = [
+        (1, "b1", '{"role":"user","content":[{"type":"text","text":"hello"}]}'),
+        (2, "b2", '{"role":"assistant","content":[{"type":"text","text":"hi back"}]}'),
+    ]
+
+    with patch.object(fwd, "_read_blob_rows", return_value=fake_rows):
+        await _persist_native_compaction_item(
+            client, session_id="conv_cursor", store_path=Path("/fake")
+        )
+
+    client.post.assert_called_once()
+    _url, kwargs = client.post.call_args
+    body = kwargs["json"]
+    assert body["type"] == "compaction"
+    assert body["data"]["last_item_id"] == "item_789"
+    assert len(body["data"]["compacted_messages"]) == 2
+    assert body["data"]["compacted_messages"][0]["role"] == "user"
+    assert body["data"]["compacted_messages"][1]["role"] == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_persist_native_compaction_item_no_store_skips_messages() -> None:
+    """When the store can't be read, POST has no compacted_messages key."""
+    client = MagicMock()
+    get_resp = MagicMock()
+    get_resp.json.return_value = {"data": [{"id": "item_abc"}]}
+    get_resp.raise_for_status = MagicMock()
+    client.get = AsyncMock(return_value=get_resp)
+
+    post_resp = MagicMock()
+    post_resp.raise_for_status = MagicMock()
+    client.post = AsyncMock(return_value=post_resp)
+
+    with patch.object(fwd, "_read_blob_rows", side_effect=sqlite3.Error("no db")):
+        await _persist_native_compaction_item(
+            client, session_id="conv_cursor", store_path=Path("/fake")
+        )
+
+    client.post.assert_called_once()
+    _url, kwargs = client.post.call_args
+    body = kwargs["json"]
+    assert body["type"] == "compaction"
+    assert body["data"]["last_item_id"] == "item_abc"
+    assert "compacted_messages" not in body["data"]
